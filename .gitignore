@@ -1,0 +1,25 @@
+# ---- Python ----
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ---- 环境变量（绝不入库）----
+.env
+
+# ---- 运行期数据 ----
+data/traces/
+data/artifacts/
+data/reports/
+data/*.db
+data/*.sqlite3
+*.log
+
+# ---- IDE ----
+.idea/
+.vscode/
+
+# ---- 上传的原始文档（体积大，不入库；评估语料单独放 data/corpus 并显式 add）----
+data/uploads/

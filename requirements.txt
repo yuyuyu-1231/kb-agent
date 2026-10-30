@@ -1,0 +1,34 @@
+# ============================================================
+# Week 1 (harness core): only pydantic. No external services needed.
+# The core can be developed purely via unit tests with mocks.
+# ============================================================
+pydantic>=2.0
+
+# ============================================================
+# Week 2 (RAG pipeline)
+# Pre-install hard gate (see docs/SPEC.md section 6):
+#   - must NOT upgrade numpy
+#   - must NOT install torch
+#   - must NOT install pandas
+#   - must NOT install magika
+# Run: pip install --dry-run -r requirements.txt  before installing.
+# ============================================================
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-multipart
+openai
+qdrant-client
+fastembed
+pymupdf
+
+# ---- test ----
+pytest
+pytest-asyncio
+
+# ============================================================
+# Deferred (do NOT install now):
+#   markitdown -> week 4 (no page numbers for PDF, pulls magika ~30MB)
+#   gradio     -> December (4h budget, cut if over)
+#   tiktoken   -> never (char-based estimate + real usage calibration)
+# ============================================================
