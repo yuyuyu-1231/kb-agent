@@ -289,12 +289,14 @@ class AgentLoop:
             )
 
             halted = False
-            for tool_call in response.tool_calls:
+            for idx, tool_call in enumerate(response.tool_calls):
                 # ⑥ 重复动作检查
                 act = guard.check_action(tool_call.name, tool_call.arguments)
                 if not act.allowed:
                     stop_reason = act.reason or StopReason.LOOP_DETECTED
                     detail = act.detail
+                    # 为本次及后续未执行的 tool_calls 补占位消息，保持协议合法
+                    self._pad_skipped_tool_calls(messages, response.tool_calls, idx)
                     halted = True
                     break
 
@@ -357,6 +359,39 @@ class AgentLoop:
             detail=detail,
             session_id=session_id,
         )
+
+    @staticmethod
+    def _pad_skipped_tool_calls(
+        messages: list[dict[str, Any]],
+        tool_calls: list[ToolCall],
+        start: int,
+    ) -> None:
+        """熔断时为未执行的 tool_calls 补占位 tool 消息。
+
+        协议要求：每个 tool_call_id 都必须有一条对应的 tool 消息。
+        如果熔断发生在一批 tool_calls 的中间，后面的调用不会执行，
+        也就不会有对应的 tool 消息 —— messages 就此变成非法状态。
+
+        实测遇到过这个错误（DeepSeek 一次返回 2 个 tool_calls，
+        只回喂 1 条 tool 消息）：
+
+            400 An assistant message with 'tool_calls' must be followed by
+                tool messages responding to each 'tool_call_id'.
+                (insufficient tool messages following tool_calls message)
+
+        当前熔断后会直接结束、不会立即重发，所以碰不到。
+        但这些 messages 一旦被写进 memory、或者将来改成“失败也记录”，
+        下次 load 出来重发就会 400。补一条带 error 的占位消息，
+        成本约 15 token，换协议合法性。
+        """
+        placeholder = json.dumps({"error": "已熔断，本次工具调用未执行"},
+                                 ensure_ascii=False)
+        for skipped in tool_calls[start:]:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": skipped.id,
+                "content": placeholder,
+            })
 
     # ---------------------------------------------------------------- 组装
 

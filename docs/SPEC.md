@@ -459,13 +459,36 @@ E:\PythonProject3\kb-agent\
 
 ---
 
-## 9. 待外部验证项（不阻塞写代码）
+## 9. 外部依赖验证结果（2026-11-04 实测完成）
 
-| 项 | 风险 | 处理 |
+| 项 | 结论 | 证据 |
 |---|---|---|
-| `LLM_MODEL_ID=deepseek-flash` | 非 DeepSeek 官方模型名（官方为 `deepseek-chat` / `deepseek-reasoner`），可能全链路 400 | 第 2 周用 `GET /models` 实测。Function Calling 必须用 `deepseek-chat` |
-| DeepSeek Function Calling 稳定性 | 工具调用是否严格遵循 JSON Schema | 第 2 周做 20 次压力测试，统计成功率 |
-| fastembed 首次下载 | 模型 90MB 落 `E:\DevCaches` | 第 2 周验证，失败则换 `intfloat/multilingual-e5-small` |
+| `LLM_MODEL_ID=deepseek-flash` | **存在，可用** | `GET /models` 返回仅 2 个：`deepseek-flash`、`deepseek-v4-pro` |
+| Function Calling | **支持** | 实测 `finish_reason=tool_calls`，一次返回 2 个 tool_calls，参数符合 schema |
+| 多轮工具调用 | **支持** | 喂回 tool 消息后模型继续决策（会再次调工具，说明必须真正的循环） |
+| `tool_call_id` 格式 | `call_00_ET_<随机串>` | 与 OpenAI 的 `call_abc123` 不同，但同样是普通字符串 |
+| fastembed 中文模型 | **支持** | 41 个模型中含 `BAAI/bge-small-zh-v1.5`，**dim=512**，0.09GB |
+| PyMuPDF 2.1 模块名 | `import pymupdf` | `fitz` 别名在 2.1 上不可靠，统一用 `pymupdf` |
+| Qdrant | **运行中** | 容器 `kb-qdrant`，`healthz check passed`，数据卷在 `E:\DevCaches\qdrant_storage` |
+
+### 一个被推翻的判断（保留记录）
+
+项目初期基于旧知识判断「`deepseek-flash` 不是官方模型名，会全链路 400」，并写进了本文件。
+
+**2026-11-04 实测证明这个判断是错的**：DeepSeek 已改成 `deepseek-flash` / `deepseek-v4-pro` 的命名，`deepseek-chat` 反而不在列表里。
+
+教训：**模型名、API 能力这类外部事实，必须以实测为准，不能用记忆代替验证。** 这类错误成本很高——如果照着旧判断改配置，反而会把本来能跑的配置改坏。
+
+### 一个真实的协议错误（实测记录）
+
+第一次跑 Function Calling 冒烟时，脚本只回喂了 1 条 tool 消息，而模型返回了 2 个 tool_calls，得到：
+
+```
+400 An assistant message with 'tool_calls' must be followed by tool messages
+    responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)
+```
+
+这验证了 2.2 和 3.1 反复强调的配对约束，也暴露了 `loop.py` 的一个缺陷：**熔断发生在一批 tool_calls 中间时，未执行的调用没有对应的 tool 消息**。已修复：`_pad_skipped_tool_calls` 补占位消息。
 
 ---
 

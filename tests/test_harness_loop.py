@@ -434,3 +434,57 @@ async def test_degrade_text_differs_by_reason(registry: ToolRegistry) -> None:
     r2 = await make_loop(BoomLLM(), registry).run("问题")
 
     assert r1.answer != r2.answer
+
+
+# --------------------------------------------------------------------------- #
+# 协议配对：熔断时必须补齐占位 tool 消息
+# --------------------------------------------------------------------------- #
+
+def test_pad_skipped_tool_calls_from_middle() -> None:
+    """一批 3 个 tool_calls，从第 2 个开始熔断，应补 2 条占位消息。"""
+    calls = [ToolCall(id=f"c{i}", name="t") for i in (1, 2, 3)]
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{i}", "type": "function",
+             "function": {"name": "t", "arguments": "{}"}}
+            for i in (1, 2, 3)
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+    ]
+
+    AgentLoop._pad_skipped_tool_calls(messages, calls, 1)
+
+    tool_ids = [m["tool_call_id"] for m in messages if m["role"] == "tool"]
+    assert tool_ids == ["c1", "c2", "c3"]
+    assert "熔断" in messages[2]["content"]
+
+
+def test_pad_skipped_tool_calls_from_zero() -> None:
+    """第一个就熔断，应补全部。"""
+    calls = [ToolCall(id="c1", name="t"), ToolCall(id="c2", name="t")]
+    messages: list[dict] = [{"role": "assistant", "content": None, "tool_calls": []}]
+
+    AgentLoop._pad_skipped_tool_calls(messages, calls, 0)
+
+    tool_ids = [m["tool_call_id"] for m in messages if m["role"] == "tool"]
+    assert tool_ids == ["c1", "c2"]
+
+
+async def test_halt_mid_batch_keeps_protocol_valid(registry: ToolRegistry) -> None:
+    """一次返回 2 个相同参数的 tool_calls，第 2 个触发熔断。
+
+    真实测过：DeepSeek 经常一次返回多个 tool_calls。如果不补占位消息，
+    messages 会处于非法状态，一旦重发就是 400。
+    """
+    resp = LLMResponse(
+        content=None,
+        tool_calls=[
+            ToolCall(id="c1", name="search_knowledge", arguments={"query": "x"}),
+            ToolCall(id="c2", name="search_knowledge", arguments={"query": "x"}),
+        ],
+        finish_reason="tool_calls",
+    )
+    llm = FakeLLM(resp)
+    result = await make_loop(llm, registry).run("问题")
+
+    assert result.stop_reason is StopReason.LOOP_DETECTED
