@@ -282,6 +282,55 @@ def test_chunk_breaks_on_page_change() -> None:
     assert "第二页" not in chunks[0]["text"], "不能把下一页内容带进上一页的 chunk"
 
 
+def test_overlap_inflates_total_chars() -> None:
+    """长度切分时，overlap 必须真的产生重复内容。
+
+    回归背景：曾经在标题切分处写成 `flush()` + 手动清空 buf，
+    overlap 算完立刻丢弃。结果虽然正确（buf 确实清空了），但 overlap
+    逻辑整体处于「空转」状态 —— 跑 trace 脚本看真实文档，膨胀比恒为
+    1.000，overlap=80 这个参数一次都没生效。
+
+    这个测试守住底线：只要发生了长度切分，总字符数就必须膨胀。
+    """
+    # 每块 50 字，共 10 块 = 500 字；chunk_size=120 装不下，必然多次切分
+    blocks = [blk(1, 100.0 + i * 20, 112.0 + i * 20, "内容" * 25) for i in range(10)]
+    chunks = chunk_blocks(blocks, chunk_size=120, overlap=50)
+
+    original = sum(len(b.text) for b in blocks)
+    total = sum(len(c["text"]) for c in chunks)
+
+    assert len(chunks) > 1, "500 字装不进 120 的容量，必须切分"
+    assert total > original, f"overlap 应导致膨胀：{total} 应大于 {original}"
+    assert total / original > 1.05, (
+        f"膨胀幅度太小（{total / original:.3f}），说明 overlap 几乎没生效"
+    )
+
+
+def test_heading_split_does_not_carry_overlap() -> None:
+    """标题切分后，新 chunk 不能带上一节的尾巴。
+
+    行为层面的保障：即使 overlap 很大，标题也应该是一个干净的起点。
+    否则「3.2 病假」的 chunk 开头会混入「3.1 年休假」的内容，
+    检索时会让两节的语义互相干扰。
+    """
+    blocks = [
+        blk(1, 100.0, 112.0, "3.1  年休假"),
+        blk(1, 120.0, 132.0, "年休假正文" * 20),      # 100 字，足够大
+        blk(1, 140.0, 152.0, "3.2  病假"),            # 触发标题切分
+        blk(1, 160.0, 172.0, "病假正文。"),
+    ]
+    assign_sections(blocks)
+
+    # overlap 设得很大，如果是「带尾巴」的策略，第二个 chunk 开头一定是年休假的内容
+    chunks = chunk_blocks(blocks, chunk_size=1000, overlap=200)
+
+    assert len(chunks) == 2
+    assert chunks[1]["text"].startswith("3.2"), (
+        f"标题切分后不应残留上一节内容，实际开头：{chunks[1]['text'][:24]}"
+    )
+    assert "年休假正文" not in chunks[1]["text"]
+
+
 def test_chunk_empty_input() -> None:
     assert chunk_blocks([]) == []
 

@@ -378,8 +378,11 @@ def chunk_blocks(
             # 如果缓冲区里全是标题（连续两个标题），让它们和后续正文待在一块，
             # 否则会产生"只有标题、没有内容"的碎片 chunk（实测出现过 7-9 字符的块）。
             if any(not x.is_heading for x in buf):
-                flush()
-                buf, buf_len = [], 0
+                # carry_overlap=False：标题是新一节的起点，不需要带上一节的尾巴。
+                # 之前写成 flush() + 手动清空 buf，导致 overlap 算完立刻丢弃 ——
+                # 8 次无用计算，而且真实文档上膨胀比恒为 1.000（overlap 参数空转），
+                # 是跑 trace_chunking.py 逐轮追踪时才发现的。
+                flush(carry_overlap=False)
 
         if buf and buf_len + len(b.text) > chunk_size:
             flush()
