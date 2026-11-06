@@ -68,7 +68,7 @@ def call(name: str, args: dict, call_id: str = "call_1", tokens: int = 10) -> LL
 def registry() -> ToolRegistry:
     reg = ToolRegistry()
 
-    @reg.tool
+    @reg.tool(citation_aware=True)
     async def search_knowledge(query: str, top_k: int = 5) -> list[dict]:
         """检索知识库。
 
@@ -78,9 +78,11 @@ def registry() -> ToolRegistry:
         """
         return [{
             "text": f"关于{query}的规定：满一年 5 天",
+            "doc_id": "doc-1",
             "doc_name": "员工手册.pdf",
             "page_no": 12,
             "section_title": "第三章 假期制度",
+            "chunk_index": 0,
             "score": 0.83,
         }]
 
@@ -488,3 +490,71 @@ async def test_halt_mid_batch_keeps_protocol_valid(registry: ToolRegistry) -> No
     result = await make_loop(llm, registry).run("问题")
 
     assert result.stop_reason is StopReason.LOOP_DETECTED
+
+
+# --------------------------------------------------------------------------- #
+# 引用编号：全局稳定 + 只返回被引用的
+# --------------------------------------------------------------------------- #
+
+async def test_tool_result_carries_stable_index(registry: ToolRegistry) -> None:
+    """工具返回给模型的内容里必须有 index，且不应暴露 chunk_index。"""
+    llm = FakeLLM(
+        call("search_knowledge", {"query": "年假"}),
+        text("答案[1]"),
+    )
+    loop = make_loop(llm, registry)
+    await loop.run("问题")
+
+    tool_msgs = [m for m in llm.calls[1]["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+
+    payload = json.loads(tool_msgs[0]["content"])
+    assert isinstance(payload, list)
+    assert payload[0]["index"] == 1, "模型要能看见 index 才能引用"
+    assert "chunk_index" not in payload[0], "chunk_index 不该占模型的 token"
+    assert payload[0]["doc_id"] == "doc-1", "doc_id 必须留着，read_document_page 要用"
+
+
+async def test_citation_index_stable_across_searches(registry: ToolRegistry) -> None:
+    """多轮检索到同一个 chunk，编号必须保持为 1。
+
+    回归背景：曾经每次 search_knowledge 都从 1 重编并直接覆盖 citations，
+    导致多轮检索时答案里的 [2] 和最终 citations 里的 [2] 指向不同内容。
+    """
+    llm = FakeLLM(
+        call("search_knowledge", {"query": "年假"}),
+        call("search_knowledge", {"query": "年假 细则"}, call_id="c2"),
+        text("综合两次检索，依据[1]。"),
+    )
+    loop = make_loop(llm, registry)
+    result = await loop.run("问题")
+
+    assert len(result.citations) == 1, "同一个 chunk 不应重复计入"
+    assert result.citations[0].index == 1
+
+
+async def test_unreferenced_citations_dropped(registry: ToolRegistry) -> None:
+    """答案里没引用到的 chunk 不进最终结果。"""
+    llm = FakeLLM(
+        call("search_knowledge", {"query": "年假"}),
+        text("这是一句没有任何编号的答案。"),
+    )
+    loop = make_loop(llm, registry)
+    result = await loop.run("问题")
+
+    assert result.citations == []
+
+
+async def test_citation_survives_tool_failure(registry: ToolRegistry) -> None:
+    """工具失败时不能分配编号，否则 citations 会出现无内容的幽灵条目。"""
+    llm = FakeLLM(
+        call("search_knowledge", {"query": "年假", "top_k": "abc"}),
+        call("search_knowledge", {"query": "年假", "top_k": 3}, call_id="c2"),
+        text("依据[1]。"),
+    )
+    loop = make_loop(llm, registry)
+    result = await loop.run("问题")
+
+    assert result.stop_reason is StopReason.ANSWERED
+    assert len(result.citations) == 1
+    assert result.citations[0].index == 1

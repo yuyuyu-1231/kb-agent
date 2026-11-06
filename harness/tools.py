@@ -64,6 +64,9 @@ class ToolSpec:
     validator: type[BaseModel]        # 动态生成的 pydantic 模型
     timeout: float = 30.0
     is_async: bool = False
+    # 返回的列表是否应当被当作「引用候选」：loop 会给每条分配全局稳定编号。
+    # 用它而不是在 loop 里硬编码工具名，避免内核层依赖应用层的命名。
+    citation_aware: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -204,10 +207,12 @@ class ToolRegistry:
         *,
         name: str | None = None,
         timeout: float = 30.0,
+        citation_aware: bool = False,
     ) -> Any:
         """装饰器。同时支持 @registry.tool 和 @registry.tool(timeout=15)。"""
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.register(func, name=name, timeout=timeout)
+            self.register(func, name=name, timeout=timeout,
+                          citation_aware=citation_aware)
             return func
 
         if fn is not None:
@@ -220,6 +225,7 @@ class ToolRegistry:
         *,
         name: str | None = None,
         timeout: float = 30.0,
+        citation_aware: bool = False,
     ) -> ToolSpec:
         """解析函数签名，生成 JSON Schema，登记到表中。"""
         tool_name = name or fn.__name__
@@ -279,6 +285,7 @@ class ToolRegistry:
             validator=validator,
             timeout=timeout,
             is_async=inspect.iscoroutinefunction(fn),
+            citation_aware=citation_aware,
         )
         self._tools[tool_name] = spec
         return spec

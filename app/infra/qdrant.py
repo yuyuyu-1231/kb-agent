@@ -202,6 +202,41 @@ class QdrantStore:
             })
         return hits
 
+    async def get_page_chunks(self, doc_id: str, page_no: int) -> list[dict[str, Any]]:
+        """按 (doc_id, page_no) 取出该页所有 chunk。
+
+        用 scroll 而不是 search：这里没有查询向量，只是按条件遍历。
+        limit 给 100 是因为一页最多也就几个 chunk，足够且不会拖慢查询。
+
+        返回的 chunk 带着 chunk_index，调用方需要按它排序后再拼接——
+        scroll 不保证顺序。
+        """
+        scroll_filter = Filter(must=[
+            FieldCondition(key="doc_id", match=MatchValue(value=doc_id)),
+            FieldCondition(key="page_no", match=MatchValue(value=page_no)),
+        ])
+
+        records, _next_offset = await self._client.scroll(
+            collection_name=self.collection,
+            scroll_filter=scroll_filter,
+            limit=100,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        chunks: list[dict[str, Any]] = []
+        for record in records:
+            payload = record.payload or {}
+            chunks.append({
+                "text": payload.get("text", ""),
+                "doc_id": payload.get("doc_id", ""),
+                "doc_name": payload.get("doc_name", ""),
+                "page_no": payload.get("page_no"),
+                "section_title": payload.get("section_title", ""),
+                "chunk_index": payload.get("chunk_index"),
+            })
+        return chunks
+
     # ---------------------------------------------------------------- 诊断
 
     async def health(self) -> dict[str, Any]:
