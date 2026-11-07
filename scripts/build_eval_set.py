@@ -146,8 +146,10 @@ DIRECT = [
         "key_points": ["一线城市", "500 元", "每人每晚"],
         "expected_sources": src((9, 5, "5.2  差旅标准")),
         "expected_action": "answer",
-        "must_not": ["350 元", "250 元"],
-        "notes": "需要模型自己判断北京属于一线城市",
+        # 不设 must_not：正确答案会列举三档标准做对比，"350 元/250 元" 必然出现。
+        # 数值正确性由 key_points 的 "500 元" 正向验证。
+        "must_not": [],
+        "notes": "需要模型自己判断北京属于一线城市；数值由 key_points 验证，不用 must_not 抓孤立金额",
     },
     {
         "id": "D11", "type": "direct", "answerable": "full",
