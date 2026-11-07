@@ -414,7 +414,180 @@ REFUSAL = [
 ]
 
 
-EVAL_ITEMS = DIRECT + MULTI_HOP + REFUSAL
+# --------------------------------------------------------------------------- #
+# 人工补充 15 条（H01-H15）：口语化 / 模糊指代 / 多意图
+#
+# 设计约束：
+# - 问法可以大改（口语、省略、指代不明），但 expected_answer 和
+#   expected_sources 必须能在那 14 个 chunk 里逐字对上。
+# - 凡是手册没说清楚的，answerable 标 partial，并在 expected_answer
+#   里明说「手册未规定 X」，而不是给一个听起来合理的结论。
+# - 不引入任何外部 HR 知识：改写只发生在语言层面。
+# --------------------------------------------------------------------------- #
+HUMAN_AUTHORED = [
+    # ---- 口语化提问 6 条 ----
+    {
+        "id": "H01", "type": "direct", "answerable": "full",
+        "question": "我刚入职俩月，能请年假不？",
+        "expected_answer": "试用期员工与正式员工享有同等休假权利，但需转正后方可申请年休假。入职两个月通常仍在试用期，需转正后再申请。",
+        "key_points": ["享有同等休假权利", "需转正后方可申请"],
+        "expected_sources": src((5, 4, "3.1  年休假")),
+        "expected_action": "answer",
+        "must_not": ["试用期没有年假"],
+        "notes": "口语「俩月」「不」；隐含信息「入职两个月≈试用期」需要模型自己补上条件，不能说死",
+    },
+    {
+        "id": "H02", "type": "direct", "answerable": "partial",
+        "question": "年假能攒着一起休吗？",
+        "expected_answer": "年休假应在当年内使用完毕；因工作原因未能安排的，经部门负责人批准可跨年顺延至次年 3 月 31 日前使用。手册未规定能否集中一次性休假。",
+        "key_points": ["当年内使用完毕", "可顺延至次年 3 月 31 日", "未规定集中休假"],
+        "expected_sources": src((5, 4, "3.1  年休假")),
+        "expected_action": "answer",
+        "must_not": ["可以随意攒假", "不能攒"],
+        "notes": "「攒着」在用户语境里可能是「累积」也可能是「集中休」；手册只规定了顺延，没规定集中休，两个都要交代才不会错",
+    },
+    {
+        "id": "H03", "type": "direct", "answerable": "full",
+        "question": "病假条要几级医院开的才算？",
+        "expected_answer": "须提供二级以上医院出具的诊断证明与病假条。",
+        "key_points": ["二级以上医院", "诊断证明", "病假条"],
+        "expected_sources": src((6, 4, "3.2  病假")),
+        "expected_action": "answer",
+        "must_not": ["三甲医院", "社区医院即可"],
+        "notes": "「几级」容易被理解成「三甲/二甲」的医院等级，手册用的是「二级以上」",
+    },
+    {
+        "id": "H04", "type": "direct", "answerable": "full",
+        "question": "我结婚能休几天？",
+        "expected_answer": "依法办理结婚登记的享受婚假 3 天；符合晚婚条件的另加 7 天。",
+        "key_points": ["3 天", "晚婚另加 7 天"],
+        "expected_sources": src((7, 4, "3.3  婚假与产假")),
+        "expected_action": "answer",
+        "must_not": ["10 天（不分晚婚）"],
+        "notes": "省略主语的短句，与 D06 同源但问法更口语",
+    },
+    {
+        "id": "H05", "type": "direct", "answerable": "full",
+        "question": "发票拖了快两个月才想起来，还能报吗？",
+        "expected_answer": "不能。员工应在费用发生后 30 日内提交发票与审批单，逾期不予受理。",
+        "key_points": ["30 日内", "逾期不予受理"],
+        "expected_sources": src((8, 5, "5.1  报销时限")),
+        "expected_action": "answer",
+        "must_not": ["可以报销", "补交说明即可"],
+        "notes": "「快两个月」需要模型自己换算成 >30 天，再对着规则判定",
+    },
+    {
+        "id": "H06", "type": "direct", "answerable": "full",
+        "question": "上班时间几点到几点啊？中午有休息吗？",
+        "expected_answer": "工作时间为上午 9:00 至下午 18:00，其中 12:00 至 13:00 为午休时间。",
+        "key_points": ["9:00", "18:00", "12:00-13:00 午休"],
+        "expected_sources": src((11, 6, "7.1  工作时间")),
+        "expected_action": "answer",
+        "must_not": ["9:00-17:00", "没有午休"],
+        "notes": "两个口语问题合并在一句，实际一个 chunk 能全答",
+    },
+
+    # ---- 模糊指代 4 条 ----
+    {
+        "id": "H07", "type": "multi_hop", "answerable": "partial",
+        "question": "那个假怎么请？",
+        "expected_answer": "「那个假」指代不明。手册规定的假期有：年休假（按工龄 5/10/15 天，试用期需转正后申请）、病假（需二级以上医院证明，工资 80%）、婚假 3 天（晚婚另加 7 天）与产假。请说明是哪一种。",
+        "key_points": ["指出指代不明", "列出可选假期类型", "请用户澄清"],
+        "expected_sources": src(
+            (5, 4, "3.1  年休假"),
+            (6, 4, "3.2  病假"),
+            (7, 4, "3.3  婚假与产假"),
+        ),
+        "expected_action": "answer",
+        "must_not": ["直接锁定一种假给出具体规则而不询问"],
+        "notes": "核心考点是「不猜」：指代不明时应列举选项并请用户确认，而不是随便选一个答",
+    },
+    {
+        "id": "H08", "type": "direct", "answerable": "full",
+        "question": "上次说的那个报销的事，最晚啥时候交啊？",
+        "expected_answer": "报销提交时限：应在费用发生后 30 日内提交发票与审批单，逾期不予受理；跨年度费用须在次年 1 月 15 日前提交。",
+        "key_points": ["30 日内", "次年 1 月 15 日"],
+        "expected_sources": src((8, 5, "5.1  报销时限")),
+        "expected_action": "answer",
+        "must_not": ["无法判断指代"],
+        "notes": "「那个报销的事」虽模糊，但「最晚什么时候交」唯一指向提交时限，应给出答案并说明假设",
+    },
+    {
+        "id": "H09", "type": "direct", "answerable": "partial",
+        "question": "我想请个长假出去玩，能连着休吗？",
+        "expected_answer": "年休假应在当年内使用完毕；因工作原因未能安排的，经部门负责人批准可跨年顺延至次年 3 月 31 日前。手册未规定能否连续多日一次性休完，也未规定请假出游的限制。",
+        "key_points": ["当年使用完毕", "可顺延至次年 3 月 31 日", "未规定连休"],
+        "expected_sources": src((5, 4, "3.1  年休假")),
+        "expected_action": "answer",
+        "must_not": ["可以连休", "不可以连休"],
+        "notes": "「长假」不是手册术语，需映射到年休假；手册没有「连休」条款，不能给确定结论",
+    },
+    {
+        "id": "H10", "type": "direct", "answerable": "partial",
+        "question": "公司管饭吗？出差的时候。",
+        "expected_answer": "出差期间餐费补贴按每人每天 100 元包干，不再另行报销餐饮发票。日常办公是否提供餐食，手册未规定。",
+        "key_points": ["餐补 100 元/天", "包干", "不再报销餐饮发票", "日常餐食未规定"],
+        "expected_sources": src((9, 5, "5.2  差旅标准")),
+        "expected_action": "answer",
+        "must_not": ["公司包三餐", "可以报销餐饮发票"],
+        "notes": "「管饭」先出现在日常语境，句末才限定「出差的时候」；需要把两个场景分开回答",
+    },
+
+    # ---- 多意图 / 多跳组合 5 条 ----
+    {
+        "id": "H11", "type": "multi_hop", "answerable": "full",
+        "question": "我要结婚了想请婚假，顺便问下上个月的出差发票还能报吗？",
+        "expected_answer": "婚假：依法登记享受 3 天，符合晚婚条件另加 7 天。报销：应在费用发生后 30 日内提交，上个月的费用若未超 30 天可报，超期则不予受理，需确认具体日期。",
+        "key_points": ["婚假 3 天（晚婚+7）", "报销 30 日内", "需确认具体日期"],
+        "expected_sources": src((7, 4, "3.3  婚假与产假"), (8, 5, "5.1  报销时限")),
+        "expected_action": "answer",
+        "must_not": ["肯定能报", "肯定不能报"],
+        "notes": "两个独立诉求；「上个月」正好在 30 天边界上，必须请用户确认日期而不能拍板",
+    },
+    {
+        "id": "H12", "type": "multi_hop", "answerable": "partial",
+        "question": "我刚转正，试用期请的病假会不会影响转正？",
+        "expected_answer": "手册未规定病假是否影响转正。仅规定：病假需二级以上医院诊断证明与病假条、工资按 80% 发放；员工应遵守公司各项规章制度。建议咨询人力资源部。",
+        "key_points": ["未规定病假影响转正", "病假需医院证明", "病假工资 80%", "建议咨询 HR"],
+        "expected_sources": src((6, 4, "3.2  病假"), (4, 3, "1.3  员工义务")),
+        "expected_action": "answer",
+        "must_not": ["会影响转正", "不会影响转正"],
+        "notes": "典型「手册没说」题：病假规则和员工义务都在库里，但「影响转正」这个结论没有任何依据",
+    },
+    {
+        "id": "H13", "type": "multi_hop", "answerable": "full",
+        "question": "我上个月迟到 4 次，还请了 2 天病假，这个月工资会少多少？",
+        "expected_answer": "迟到：每次 30 分钟以内扣当日工资 10%；当月累计超过 3 次取消当季全勤奖。病假：按本人工资 80% 发放。具体扣减金额需按你的日工资和全勤奖金额计算，手册未给出具体数额。",
+        "key_points": ["每次扣当日工资 10%", "累计超 3 次取消全勤奖", "病假 80%", "具体金额需自行计算"],
+        "expected_sources": src((12, 6, "7.2  迟到与早退"), (6, 4, "3.2  病假")),
+        "expected_action": "answer",
+        "must_not": ["直接给出具体金额"],
+        "notes": "三条规则叠加；陷阱是模型可能编一个具体数字，而手册只有比例",
+    },
+    {
+        "id": "H14", "type": "multi_hop", "answerable": "partial",
+        "question": "我想请陪产假，需要什么证明？",
+        "expected_answer": "男职工享受陪产假 15 天。手册未规定陪产假需要提交什么证明材料（只对病假规定了二级以上医院证明，不适用于陪产假）。建议咨询人力资源部。",
+        "key_points": ["陪产假 15 天", "未规定证明材料", "病假证明规则不适用"],
+        "expected_sources": src((7, 4, "3.3  婚假与产假"), (6, 4, "3.2  病假")),
+        "expected_action": "answer",
+        "must_not": ["按病假提交医院诊断证明"],
+        "notes": "陷阱题：医院证明的规则只写在病假那一节，套到陪产假上就是错的",
+    },
+    {
+        "id": "H15", "type": "multi_hop", "answerable": "partial",
+        "question": "部门说要调整作息，这个谁定？调了之后加班怎么算？",
+        "expected_answer": "作息调整：因业务需要调整作息的，由部门另行通知。加班费：工作日 1.5 倍、休息日且不能调休的 2 倍、法定节假日 3 倍。调整作息后如何认定加班，手册未规定。",
+        "key_points": ["部门另行通知", "三种加班倍数", "调整后加班认定未规定"],
+        "expected_sources": src((11, 6, "7.1  工作时间"), (13, 6, "7.3  加班")),
+        "expected_action": "answer",
+        "must_not": ["公司统一调整", "调整后不算加班"],
+        "notes": "两问两答，第二问的后半段（调整后如何认定）手册没写",
+    },
+]
+
+
+EVAL_ITEMS = DIRECT + MULTI_HOP + REFUSAL + HUMAN_AUTHORED
 
 
 # --------------------------------------------------------------------------- #
@@ -479,8 +652,12 @@ ANSWERABLE_LABEL = {"full": "完整可答", "partial": "部分可答", "none": "
 
 
 def write_markdown(items: list[dict]) -> None:
+    # AI 起草的 D/M/R 按类型分组；人工补充的 H 单独成节，方便分两批审阅
+    ai_items = [i for i in items if not i["id"].startswith("H")]
+    human_items = [i for i in items if i["id"].startswith("H")]
+
     by_type: dict[str, list[dict]] = {"direct": [], "multi_hop": [], "refusal": []}
-    for item in items:
+    for item in ai_items:
         by_type[item["type"]].append(item)
 
     lines: list[str] = []
@@ -493,6 +670,7 @@ def write_markdown(items: list[dict]) -> None:
     lines.append(f"| 直接事实 | {len(by_type['direct'])} | 答案落在单个 chunk |")
     lines.append(f"| 跨段落多跳 | {len(by_type['multi_hop'])} | 需组合 2 个以上 chunk |")
     lines.append(f"| 应拒答 | {len(by_type['refusal'])} | 知识库无相关内容，应说明未找到 |")
+    lines.append(f"| 人工补充 | {len(human_items)} | 口语化 / 模糊指代 / 多意图，答案仍只来自语料 |")
     lines.append("")
     lines.append("## 字段说明")
     lines.append("")
@@ -504,57 +682,52 @@ def write_markdown(items: list[dict]) -> None:
     lines.append("---")
     lines.append("")
 
+    def render(item: dict) -> None:
+        lines.append(f"### {item['id']}　{item['question']}")
+        lines.append("")
+        lines.append(f"**标准答案**：{item['expected_answer']}")
+        lines.append("")
+        lines.append(
+            f"**标记**：{ANSWERABLE_LABEL[item['answerable']]} · "
+            f"{ACTION_LABEL[item['expected_action']]}"
+        )
+        lines.append("")
+        lines.append("**关键点**：" + " / ".join(f"`{k}`" for k in item["key_points"]))
+        lines.append("")
+        if item["expected_sources"]:
+            refs = " ；".join(
+                f"chunk {s['chunk_index']} · p.{s['page_no']} · {s['section_title']}"
+                for s in item["expected_sources"]
+            )
+            lines.append(f"**来源**：{refs}")
+        else:
+            lines.append("**来源**：（无，应拒答）")
+        lines.append("")
+        if item["must_not"]:
+            lines.append("**禁止出现**：" + " / ".join(f"`{m}`" for m in item["must_not"]))
+            lines.append("")
+        if item["notes"]:
+            lines.append(f"**备注**：{item['notes']}")
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    section_no = 0
     for tkey in ("direct", "multi_hop", "refusal"):
-        group_label = TYPE_LABEL[tkey]
-        lines.append(f"## {group_label}（{len(by_type[tkey])} 条）")
+        section_no += 1
+        lines.append(f"## {section_no}、{TYPE_LABEL[tkey]}（{len(by_type[tkey])} 条）")
         lines.append("")
         for item in by_type[tkey]:
-            lines.append(f"### {item['id']}　{item['question']}")
-            lines.append("")
-            lines.append(f"**标准答案**：{item['expected_answer']}")
-            lines.append("")
-            lines.append(
-                f"**标记**：{ANSWERABLE_LABEL[item['answerable']]} · "
-                f"{ACTION_LABEL[item['expected_action']]}"
-            )
-            lines.append("")
-            lines.append(
-                "**关键点**：" + " / ".join(f"`{k}`" for k in item["key_points"])
-            )
-            lines.append("")
-            if item["expected_sources"]:
-                refs = " ；".join(
-                    f"chunk {s['chunk_index']} · p.{s['page_no']} · {s['section_title']}"
-                    for s in item["expected_sources"]
-                )
-                lines.append(f"**来源**：{refs}")
-            else:
-                lines.append("**来源**：（无，应拒答）")
-            lines.append("")
-            if item["must_not"]:
-                lines.append(
-                    "**禁止出现**：" + " / ".join(f"`{m}`" for m in item["must_not"])
-                )
-                lines.append("")
-            if item["notes"]:
-                lines.append(f"**备注**：{item['notes']}")
-                lines.append("")
-            lines.append("---")
-            lines.append("")
+            render(item)
 
-    lines.append("## 待补充：你负责的 15 条")
+    section_no += 1
+    lines.append(f"## {section_no}、人工补充（{len(human_items)} 条）")
     lines.append("")
-    lines.append("按一线客服的真实提问方式补 15 条，建议覆盖三类：")
+    lines.append("覆盖口语化提问、模糊指代、多意图三类真实提问方式。**答案仍然只来自那 14 个 chunk**；")
+    lines.append("凡是手册没写的，标准答案里明说「未规定」，`must_not` 里列出不该出现的编造内容。")
     lines.append("")
-    lines.append("| 类别 | 建议条数 | 示例 |")
-    lines.append("|---|---|---|")
-    lines.append("| 口语化提问 | 6 | 「我刚入职俩月，能请年假不？」 |")
-    lines.append("| 模糊指代 | 4 | 「那个假期的事，能拖到明年吗？」（指代不明，测澄清能力） |")
-    lines.append("| 多意图混合 | 5 | 「我要离婚了想请几天假，顺便问下报销还没交怎么办」 |")
-    lines.append("")
-    lines.append("补的时候直接往 `data/eval_set.jsonl` 里加，字段照抄现有结构，")
-    lines.append("`id` 用 `H01`–`H15`（H = human）。")
-    lines.append("")
+    for item in human_items:
+        render(item)
 
     MD_PATH.parent.mkdir(parents=True, exist_ok=True)
     MD_PATH.write_text("\n".join(lines), encoding="utf-8")
