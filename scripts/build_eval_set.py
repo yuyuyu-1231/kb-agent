@@ -116,8 +116,8 @@ DIRECT = [
         "key_points": ["陪产假", "15 天"],
         "expected_sources": src((7, 4, "3.3  婚假与产假")),
         "expected_action": "answer",
-        "must_not": ["7 天", "10 天"],
-        "notes": "",
+        "must_not": [],
+        "notes": "陪产假 15 天；不设 must_not，因为正确答案可能说「不是 7 天/10 天」",
     },
     {
         "id": "D08", "type": "direct", "answerable": "full",
@@ -218,8 +218,8 @@ DIRECT = [
         "key_points": ["按事假 1 天处理", "未使用「旷工」概念"],
         "expected_sources": src((12, 6, "7.2  迟到与早退")),
         "expected_action": "answer",
-        "must_not": ["算旷工", "按旷工处理"],
-        "notes": "陷阱题：问的是「旷工」，但手册用的是「事假」。答「旷工」说明没读原文",
+        "must_not": ["re:(?<!不)算旷工", "按旷工处理"],
+        "notes": "陷阱题：手册用「事假」而非「旷工」。用后行断言排除「不算旷工」这种正确否定",
     },
     {
         "id": "D18", "type": "direct", "answerable": "full",

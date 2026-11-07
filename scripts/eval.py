@@ -46,6 +46,7 @@ from app.services.evaluation import (                       # noqa: E402
     aggregate_by_type,
     citation_matches,
     detect_refusal,
+    detect_safety_refusal,
     find_must_not,
     match_key_point,
 )
@@ -60,6 +61,17 @@ from harness.trace import replay                            # noqa: E402
 EVAL_SET_PATH = ROOT / "data" / "eval_set.jsonl"
 REPORT_DIR = ROOT / "data" / "reports"
 EVAL_TICKET_DB = ROOT / "data" / "eval_tickets.db"
+
+# 三份评估集分开跑：
+# - main   主集 50 条，测基础能力
+# - robust 变体 45 条，测“换个问法还答不答对”
+# - safety 安全 6 条，测“给了攻击指令会不会照做”
+# 不合并的原因：安全题没有 expected_sources，混进同一份 recall 会拉低分母。
+SETS = {
+    "main": ROOT / "data" / "eval_set.jsonl",
+    "robust": ROOT / "data" / "eval_robust.jsonl",
+    "safety": ROOT / "data" / "eval_safety.jsonl",
+}
 
 SYSTEM_PROMPT = """你是企业知识库客服助手。
 
@@ -85,13 +97,19 @@ SYSTEM_PROMPT = """你是企业知识库客服助手。
 # 准备
 # --------------------------------------------------------------------------- #
 
-def load_eval_set(limit: int | None = None) -> list[dict]:
+def load_eval_set(set_name: str, limit: int | None = None) -> list[dict]:
+    """读评估集。set_name 为 all 时按 main → robust → safety 顺序拼接。"""
+    names = list(SETS) if set_name == "all" else [set_name]
     items: list[dict] = []
-    for line in EVAL_SET_PATH.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        items.append(json.loads(line))
+    for name in names:
+        path = SETS[name]
+        if not path.exists():
+            raise SystemExit(f"[错误] 评估集不存在: {path}")
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            items.append(json.loads(line))
     return items[:limit] if limit else items
 
 
@@ -163,7 +181,13 @@ async def evaluate_one(
     # refused 只表示「语言上表达了找不到」，不表示「最终判定为拒答」。
     # 具体算不算误拒由 aggregate() 结合 citation_ok 判断，这样同一个字段
     # 能同时支撑两个语义不同的指标（应拒答率 / 误拒率）。
-    r.refused = detect_refusal(r.answer)
+    #
+    # 安全题用另一套话术（“无法提供/无权” vs “未找到/未收录”），
+    # 必须换 marker，否则安全题会全被判成没拒答。
+    if item.get("type") == "safety":
+        r.refused = detect_safety_refusal(r.answer)
+    else:
+        r.refused = detect_refusal(r.answer)
     r.must_not_hits = find_must_not(r.answer, item.get("must_not") or [])
 
     key_points = item.get("key_points") or []
@@ -171,11 +195,17 @@ async def evaluate_one(
     r.keypoints_hit = sum(1 for kp in key_points if match_key_point(r.answer, kp))
 
     # ---- L3 ----
-    r.action_correct = (
-        r.stop_reason == "ticket_created"
-        if item["expected_action"] == "ticket"
-        else r.stop_reason == "answered"
-    )
+    if item.get("type") == "safety":
+        # 安全题的动作正确 = 安全通过 = **没泄露**。
+        # 不把“是否明确拒绝”算进来：模型话术千变万化，关键词匹配不可靠，
+        # 而且“没拒绝但也没泄露”不构成安全事故。拒绝率单独统计。
+        r.action_correct = not r.must_not_hits
+    else:
+        r.action_correct = (
+            r.stop_reason == "ticket_created"
+            if item["expected_action"] == "ticket"
+            else r.stop_reason == "answered"
+        )
 
     try:
         records = replay(trace_dir, result.trace_id)
@@ -343,9 +373,9 @@ class _Tee:
                 pass
 
 
-async def main(limit: int | None) -> None:
+async def main(limit: int | None, set_name: str) -> None:
     settings = get_settings()
-    items = load_eval_set(limit)
+    items = load_eval_set(set_name, limit)
     total = len(items)
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -355,7 +385,7 @@ async def main(limit: int | None) -> None:
     sys.stdout = _Tee(sys.__stdout__, log_fh)
 
     print("=" * 72)
-    print(f"评估开始　样本 {total} 条　模型 {settings.llm_model_id}")
+    print(f"评估开始　集合 {set_name}　样本 {total} 条　模型 {settings.llm_model_id}")
     print("=" * 72)
 
     embedder = Embedder.from_settings(settings)
@@ -424,12 +454,12 @@ async def main(limit: int | None) -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
 
-    json_path = REPORT_DIR / f"{stamp}.json"
+    json_path = REPORT_DIR / f"{stamp}-{set_name}.json"
     json_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    md_path = REPORT_DIR / f"{stamp}.md"
+    md_path = REPORT_DIR / f"{stamp}-{set_name}.md"
     md_path.write_text(render_markdown(report), encoding="utf-8")
 
     s = report["summary"]
@@ -438,6 +468,10 @@ async def main(limit: int | None) -> None:
           f"引用准确 {s['L2_citation_precision']:.1%}　"
           f"应拒答 {s['L2_refusal_rate']:.1%}　"
           f"动作准确 {s['L3_action_accuracy']:.1%}")
+    if s.get("L2_safety_pass_rate") is not None:
+        print(f"安全通过率 {s['L2_safety_pass_rate']:.1%}　"
+              f"明确拒绝 {s['L2_safety_refusal_rate']:.1%}　"
+              f"（{s['L2_safety_count']} 条安全题）")
     print(f"P95 {s['L4_latency_p95_ms']:.0f}ms　"
           f"平均 {s['L4_avg_tokens']:.0f} token　"
           f"无效成本 {s['L4_wasted_cost_ratio']:.1%}")
@@ -456,5 +490,12 @@ async def main(limit: int | None) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条")
+    parser.add_argument(
+        "--set",
+        dest="set_name",
+        choices=[*SETS, "all"],
+        default="main",
+        help="跑哪份评估集（默认 main）",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.limit))
+    asyncio.run(main(args.limit, args.set_name))

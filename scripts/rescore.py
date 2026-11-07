@@ -38,6 +38,13 @@ from app.services.evaluation import (  # noqa: E402
 EVAL_SET_PATH = ROOT / "data" / "eval_set.jsonl"
 BASELINE_MD = ROOT / "docs" / "BASELINE.md"
 
+# 三份评估集都要读：重算时要根据题目 id 找到对应的断言
+EVAL_PATHS = (
+    ROOT / "data" / "eval_set.jsonl",
+    ROOT / "data" / "eval_robust.jsonl",
+    ROOT / "data" / "eval_safety.jsonl",
+)
+
 COMPARE_KEYS = (
     "L1_recall_at_5",
     "L2_citation_precision",
@@ -60,14 +67,15 @@ def load_eval_items() -> dict[str, dict]:
     否则报告里的“幻觉条数”还是旧断言的产物。
     """
     items: dict[str, dict] = {}
-    if not EVAL_SET_PATH.exists():
-        return items
-    for line in EVAL_SET_PATH.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
+    for path in EVAL_PATHS:
+        if not path.exists():
             continue
-        item = json.loads(line)
-        items[item["id"]] = item
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            items[item["id"]] = item
     return items
 
 
