@@ -128,6 +128,51 @@ class SessionMemory:
 
         return data if isinstance(data, list) else []
 
+    def exists(self, session_id: str) -> bool:
+        """会话是否存在。
+
+        为什么需要：API 层要校验客户端回传的 session_id。
+        没有这个校验，客户端可以随便编一个 id 去读别人的会话。
+        本项单机演示风险低，但这是免费的正确性，没理由不做。
+        """
+        if not session_id:
+            return False
+
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+
+    def ensure(self, session_id: str) -> None:
+        """确保会话存在（不存在就建一条空记录）。
+
+        为什么需要：loop 只在 answered / ticket_created 时才写记忆。
+        如果第一次请求因为 llm_error 失败，会话不会被创建，
+        但服务端已经把 id 发给客户端了 —— 客户端第二次用这个 id 就会 400。
+        API 层在建会话时先 ensure 一次，避免产生悬空 id。
+        """
+        if not session_id:
+            return
+
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO sessions (session_id, history_json, updated_at)
+                    VALUES (?, '[]', ?)
+                    ON CONFLICT(session_id) DO NOTHING
+                    """,
+                    (session_id, _now_iso()),
+                )
+        finally:
+            conn.close()
+
     # ---------------------------------------------------------------- 写
 
     def append(self, session_id: str, *messages: dict[str, Any]) -> int:

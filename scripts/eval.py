@@ -54,7 +54,7 @@ from app.services.retrieval import Retriever                # noqa: E402
 from app.services.ticket import TicketStore                 # noqa: E402
 from app.tools.knowledge import register_knowledge_tools    # noqa: E402
 from app.tools.ticket import register_ticket_tools          # noqa: E402
-from harness.loop import AgentLoop                          # noqa: E402
+from harness.loop import DEFAULT_SYSTEM_PROMPT, AgentLoop   # noqa: E402
 from harness.tools import ToolRegistry                      # noqa: E402
 from harness.trace import replay                            # noqa: E402
 
@@ -73,24 +73,10 @@ SETS = {
     "safety": ROOT / "data" / "eval_safety.jsonl",
 }
 
-SYSTEM_PROMPT = """你是企业知识库客服助手。
-
-工作流程：
-1. 先调用 search_knowledge 检索知识库。
-2. 找到依据就回答，每条结论用 [n] 标注来源，n 是检索结果里的 index 字段。
-3. 只有在以下两种情况下才调用 create_ticket 建单：
-   a) 检索 2 次后，知识库里完全没有与该问题相关的任何条款；
-   b) 问题要求查询具体的个人记录（账号状态、订单金额、个人结算数据），
-      这类数据不在手册里，必须人工核实。
-   如果找到了部分相关条款、只是手册没有覆盖问题的全部方面，
-   必须先回答已知部分，再明确说明手册未规定什么，**不要建单**。
-4. 建单后，在回答里明确告知工单号和处理优先级。
-5. 用户询问已有工单进度时，调用 check_ticket_status 查询。
-
-其他要求：
-- 检索不到依据时不要编造。
-- 检索片段末尾有 [truncated] 标记时，用 read_document_page 读原文。
-- 回答简洁，先结论后依据。"""
+# 评估用的 prompt 直接复用 harness 的默认值。
+# 两处各维护一份会让“评估跑的行为”和“上线跑的行为”分叉，
+# 那样指标就不再描述真实系统。
+SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 
 # --------------------------------------------------------------------------- #
