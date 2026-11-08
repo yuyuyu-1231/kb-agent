@@ -307,7 +307,14 @@ class AgentLoop:
             # ① 上下文裁剪
             fit = self.context.fit(messages)
             messages = fit.messages
-            used_tokens = max(used_tokens, fit.estimated_tokens)
+            # 注意：这里不用 fit.estimated_tokens 去更新 used_tokens。
+            # 两者语义不同：
+            #   fit.estimated_tokens = 本次请求的上下文**大小**
+            #   used_tokens          = 本次 run 的**累计消耗**
+            # 混用会把「上下文本身就很长」误判成「预算耗尽」——
+            # 实测 token_budget=50 时，光 system prompt 就 400 token，
+            # 于是第 0 轮就熔断，steps=0，模型一次都没被调用。
+            # 上下文超预算由 ContextManager 负责裁剪，不该由熔断兜。
             if fit.trimmed:
                 tracer.step(
                     thought="[context] " + "；".join(fit.actions),
