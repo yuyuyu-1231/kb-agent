@@ -106,11 +106,16 @@ class QdrantStore:
         doc_name: str,
         chunks: list[dict[str, Any]],
         vectors: list[list[float]],
+        content_hash: str = "",
     ) -> int:
         """批量写入。chunk 与 vector 必须一一对应。
 
         chunks 里每项至少有 text / page_no / chunk_index；
         可选 section_title / char_start / char_end。
+
+        `content_hash` 是文件内容的 sha256，用于上传时的幂等判断：
+        同一个 doc_id 且 hash 相同 → 说明这份文件已经在库里，跳过重复解析。
+        不传则留空（历史数据没有这个字段）。
         """
         if len(chunks) != len(vectors):
             raise ValueError(
@@ -132,6 +137,7 @@ class QdrantStore:
                 "char_start": chunk.get("char_start"),
                 "char_end": chunk.get("char_end"),
                 "text": chunk.get("text", ""),
+                "content_hash": content_hash,
                 "created_at": now,
             }
             points.append(PointStruct(
@@ -236,6 +242,92 @@ class QdrantStore:
                 "chunk_index": payload.get("chunk_index"),
             })
         return chunks
+
+    async def get_document_meta(self, doc_id: str) -> dict[str, Any] | None:
+        """查一份文档的入库状态：chunk 数与内容哈希。
+
+        用途：上传接口判断“这份文件是不是已经在库里”。
+
+        为什么分两步查：
+        - scroll limit=1 只为了拿 payload 里的 content_hash
+        - count + filter 拿准确的 chunk 数
+        一步拿全量 payload 也能算，但文档大时会白读几百条记录。
+
+        不存在时返回 None。
+        """
+        scroll_filter = Filter(must=[
+            FieldCondition(key="doc_id", match=MatchValue(value=doc_id))
+        ])
+
+        records, _next = await self._client.scroll(
+            collection_name=self.collection,
+            scroll_filter=scroll_filter,
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not records:
+            return None
+
+        payload = records[0].payload or {}
+        counted = await self._client.count(
+            collection_name=self.collection,
+            count_filter=scroll_filter,
+            exact=True,
+        )
+        return {
+            "doc_id": doc_id,
+            "doc_name": payload.get("doc_name", ""),
+            "chunk_count": int(counted.count),
+            # 历史数据没有这个字段，返回空串而不是 None，
+            # 方便调用方直接比较，不用写 None 判断
+            "content_hash": payload.get("content_hash", ""),
+        }
+
+    async def list_documents(self) -> list[dict[str, Any]]:
+        """列出所有文档（按 doc_id 聚合）。
+
+        实现方式：全量 scroll 后内存聚合。
+
+        **这是 v1 的已知边界**：chunk 上万时会一次读几百条 payload。
+        真要支持大库，应该额外维护一张 documents 表，写入时更新，
+        查询时 O(1)。当前 14 个 chunk 的规模不值得那么做。
+        """
+        records, _next = await self._client.scroll(
+            collection_name=self.collection,
+            limit=10000,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        agg: dict[str, dict[str, Any]] = {}
+        for record in records:
+            payload = record.payload or {}
+            doc_id = payload.get("doc_id", "")
+            if not doc_id:
+                continue
+            entry = agg.get(doc_id)
+            if entry is None:
+                entry = {
+                    "doc_id": doc_id,
+                    "doc_name": payload.get("doc_name", ""),
+                    "chunk_count": 0,
+                    "content_hash": payload.get("content_hash", ""),
+                    "_pages": set(),
+                }
+                agg[doc_id] = entry
+            entry["chunk_count"] += 1
+            page_no = payload.get("page_no")
+            if page_no is not None:
+                entry["_pages"].add(page_no)
+
+        result: list[dict[str, Any]] = []
+        for entry in agg.values():
+            pages = entry.pop("_pages")
+            entry["page_count"] = len(pages)
+            result.append(entry)
+
+        return sorted(result, key=lambda d: str(d["doc_id"]))
 
     # ---------------------------------------------------------------- 诊断
 

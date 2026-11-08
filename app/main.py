@@ -32,7 +32,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health
+from app.api import documents, health, qa
 from app.core.config import get_settings
 from app.infra.embedding import Embedder
 from app.infra.llm import OpenAILLMClient
@@ -106,6 +106,8 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(documents.router)
+    app.include_router(qa.router)
 
     return app
 
