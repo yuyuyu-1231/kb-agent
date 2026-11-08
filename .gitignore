@@ -13,6 +13,7 @@ __pycache__/
 data/traces/
 data/artifacts/
 data/reports/
+data/corpus_layout/
 data/*.db
 data/*.sqlite3
 *.log
