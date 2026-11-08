@@ -25,11 +25,11 @@ harness/loop.py 只认 `async chat(messages, tools) -> LLMResponse`，
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
 
-from harness.loop import LLMResponse, ToolCall
+from harness.loop import LLMDelta, LLMResponse, ToolCall
 
 
 def _parse_arguments(raw: str | None) -> dict[str, Any]:
@@ -113,6 +113,99 @@ class OpenAILLMClient:
 
         resp = await self._client.chat.completions.create(**kwargs)
         return self._to_response(resp)
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[LLMDelta]:
+        """流式调用。逐块产出文本，tool_calls 在末尾一次性给出。
+
+        三个必须处理的坑：
+
+        1. **tool_calls 是分片到达的**
+           第一块只有 id 和 name，后续块只有 arguments 的片段。
+           必须按 index 分开累积，最后拼成一份完整的 JSON 字符串。
+           这是 SDK 细节，不能泄到内核。
+
+        2. **usage 只在最后一个 chunk 出现**
+           而且要显式传 `stream_options={"include_usage": True}`
+           才会返回。不传的话 token 统计全是 0，评估就废了。
+
+        3. **有些 chunk 的 choices 是空列表**
+           带 usage 的那个 chunk 往往就没有 choices。
+           不判空会在 `chunk.choices[0]` 上 IndexError。
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        if self.max_tokens:
+            kwargs["max_tokens"] = self.max_tokens
+
+        stream = await self._client.chat.completions.create(**kwargs)
+
+        # index -> {id, name, args}，按工具序号分开累积
+        buffers: dict[int, dict[str, str]] = {}
+        finish_reason = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        async for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage:
+                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+
+            choice = choices[0]
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+
+            if delta.content:
+                yield LLMDelta(content=delta.content)
+
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                idx = tc.index if tc.index is not None else 0
+                slot = buffers.setdefault(idx, {"id": "", "name": "", "args": ""})
+                if tc.id:
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if fn.name:
+                        slot["name"] = fn.name
+                    if fn.arguments:
+                        slot["args"] += fn.arguments
+
+        calls = [
+            ToolCall(
+                id=slot["id"] or f"call_{idx}",
+                name=slot["name"],
+                arguments=_parse_arguments(slot["args"]),
+                raw_arguments=slot["args"],
+            )
+            for idx, slot in sorted(buffers.items())
+        ]
+
+        yield LLMDelta(
+            tool_calls=calls,
+            finish_reason=finish_reason or ("tool_calls" if calls else "stop"),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
 
     # ---------------------------------------------------------------- 转换
 

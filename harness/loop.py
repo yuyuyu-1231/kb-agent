@@ -42,7 +42,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol, runtime_checkable
 
 from .context import ContextManager
 from .guard import Guard, StopReason
@@ -83,14 +83,45 @@ class LLMResponse:
         return self.prompt_tokens + self.completion_tokens
 
 
+@dataclass
+class LLMDelta:
+    """流式输出的一个增量块。
+
+    两类内容不会同时出现在同一个 delta 里：
+      - 流进行中：content 有值，tool_calls 为空
+      - 流结束时：content 为空，tool_calls 是累积好的完整列表
+
+    tool_calls 必须在适配层累积完再一次性给出 —— OpenAI 兼容协议的
+    流式 tool_calls 是分片的（name 在第一块，arguments 逐块追加），
+    分片状态是 SDK 细节，不该泄漏到内核。
+    """
+    content: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    finish_reason: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+@dataclass
+class AgentEvent:
+    """Agent 运行过程中的一个事件。
+
+    type 取值：
+      token      {"text": "..."}              模型输出的一个文本增量
+      tool_call  {"name", "arguments"}       即将执行一个工具
+      citation   {"citations": [...]}       引用编号有更新
+      done       {"result": AgentResult}     运行结束，携带完整结果
+    """
+    type: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+
 @runtime_checkable
 class LLMClient(Protocol):
-    """LLM 适配层需要实现的唯一方法。
+    """LLM 适配层需要实现的两个方法。
 
-    实现方（app/infra/llm.py）负责：
-    - 把 messages + tools 转成 SDK 的参数
-    - 把 SDK 的响应转成 LLMResponse
-    - 把 function.arguments 字符串解析成 dict
+    `run_stream` 只调 `chat_stream`，`run` 又基于 `run_stream` ——
+    所以 **两个方法都必须是真实现**，不能只实现 chat 就了事。
     """
 
     async def chat(
@@ -98,6 +129,12 @@ class LLMClient(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse: ...
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[LLMDelta]: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -284,8 +321,20 @@ class AgentLoop:
 
     # ---------------------------------------------------------------- 对外
 
-    async def run(self, question: str, session_id: str = "") -> AgentResult:
-        """跑一次完整的 Agent 循环。任何情况下都返回 AgentResult，不抛异常。"""
+    async def run_stream(
+        self,
+        question: str,
+        session_id: str = "",
+    ) -> AsyncIterator[AgentEvent]:
+        """跑一次完整的 Agent 循环，边跑边产出事件。
+
+        **这是唯一的实现。** `run()` 只是它的收集器。
+
+        为什么不让 run 和 run_stream 各写一套：
+        API 上线跑的是 run_stream。如果测试只覆盖 run，
+        那 170+ 个测试守的就是一段不会执行的代码 ——
+        「测试通过」不再等于「上线能跑」。
+        """
         started = time.perf_counter()
         tracer = self._make_tracer()
         guard = Guard(
@@ -331,14 +380,40 @@ class AgentLoop:
                 detail = decision.detail
                 break
 
-            # ③ 调模型
+            # ③ 流式调模型：边收边发 token 事件
+            text_parts: list[str] = []
+            final_calls: list[ToolCall] = []
+            finish_reason = ""
+            prompt_tokens = 0
+            completion_tokens = 0
             try:
-                response = await self.llm.chat(messages, self.registry.schemas())
+                async for delta in self.llm.chat_stream(
+                    messages, self.registry.schemas()
+                ):
+                    if delta.content:
+                        text_parts.append(delta.content)
+                        yield AgentEvent("token", {"text": delta.content})
+                    if delta.tool_calls:
+                        final_calls = delta.tool_calls
+                    if delta.finish_reason:
+                        finish_reason = delta.finish_reason
+                    if delta.prompt_tokens:
+                        prompt_tokens = delta.prompt_tokens
+                    if delta.completion_tokens:
+                        completion_tokens = delta.completion_tokens
             except Exception as exc:  # noqa: BLE001 - 网络/限流都可能抛
                 stop_reason = StopReason.LLM_ERROR
                 detail = f"{type(exc).__name__}: {exc}"
                 tracer.step(tool="__llm__", ok=False, observation=detail)
                 break
+
+            response = LLMResponse(
+                content="".join(text_parts),
+                tool_calls=final_calls,
+                finish_reason=finish_reason or "stop",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
 
             steps += 1
             used_tokens += response.total_tokens
@@ -374,16 +449,30 @@ class AgentLoop:
                     break
 
                 # ⑦ 执行工具（失败已被 ToolRegistry 收敛成 ToolResult）
+                # 先发事件，前端能立刻显示“正在检索”，而不是等到工具跑完
+                yield AgentEvent("tool_call", {
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                })
+                
                 result = await self.registry.call(tool_call.name, tool_call.arguments)
-
+                
                 # 引用候选：分配全局稳定编号，并把 index 塞回给模型看的内容。
-                # 必须在写进 messages 之前做，否则模型看到的还是没编号的版本。
+                # 必须在写进 messages 之前做，否则模型看到的还是没有编号的版本。
                 spec = self.registry.get(tool_call.name)
                 has_citations = (
                     result.ok and spec is not None and spec.citation_aware
                 )
                 if has_citations:
+                    before = len(citation_registry)
                     result = self._annotate_citations(result, citation_registry)
+                    # 有新引用才推，避免每轮都把全量重发一遍
+                    if len(citation_registry) > before:
+                        yield AgentEvent("citation", {
+                            "citations": [
+                                c.to_dict() for c in citation_registry.all()
+                            ],
+                        })
 
                 messages.append({
                     "role": "tool",
@@ -432,18 +521,38 @@ class AgentLoop:
         # 只返回答案里真正引用到的条目：拒答时天然为空
         citations = citation_registry.referenced_by(answer)
 
-        return AgentResult(
-            answer=answer,
-            stop_reason=stop_reason,
-            trace_id=tracer.trace_id,
-            citations=citations,
-            ticket_id=ticket_id,
-            steps=steps,
-            latency_ms=elapsed_ms,
-            tokens=used_tokens,
-            detail=detail,
-            session_id=session_id,
-        )
+        yield AgentEvent("done", {
+            "result": AgentResult(
+                answer=answer,
+                stop_reason=stop_reason,
+                trace_id=tracer.trace_id,
+                citations=citations,
+                ticket_id=ticket_id,
+                steps=steps,
+                latency_ms=elapsed_ms,
+                tokens=used_tokens,
+                detail=detail,
+                session_id=session_id,
+            ),
+        })
+
+    async def run(self, question: str, session_id: str = "") -> AgentResult:
+        """非流式入口：消费 run_stream，取 done 事件里的结果。
+
+        存在的意义只是方便脚本 / 评估 / 单测调用 —— **逻辑一行都不重复**。
+
+        为什么不保留一份独立的 run 实现：
+        API 上线跑 run_stream。如果 run 自成一套，那测试覆盖的
+        就是一段线上不会执行的代码，「测试通过」不再等于「线上能跑」。
+        """
+        result: AgentResult | None = None
+        async for event in self.run_stream(question, session_id):
+            if event.type == "done":
+                result = event.data["result"]
+        if result is None:
+            # run_stream 每条分支都会 yield done，走到这里说明代码有 bug
+            raise RuntimeError("run_stream 未产出 done 事件")
+        return result
 
     @staticmethod
     def _pad_skipped_tool_calls(

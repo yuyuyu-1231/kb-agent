@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from harness.guard import StopReason
-from harness.loop import AgentLoop, LLMResponse, ToolCall
+from harness.loop import AgentLoop, LLMDelta, LLMResponse, ToolCall
 from harness.memory import SessionMemory
 from harness.tools import ToolRegistry
 from harness.trace import replay
@@ -38,10 +38,34 @@ class FakeLLM:
             raise AssertionError("FakeLLM 的预设响应已用完")
         return self._queue.pop(0)
 
+    async def chat_stream(self, messages, tools=None):
+        """把预设响应切成流。
+
+        测试只关心「内容能不能拼回来」，不模拟真实网络分片。
+        按 3 字符一块切开就够验证 loop 的拼接逻辑了。
+
+        注意：内部调 self.chat，所以 calls 的记录行为与之前一致，
+        现有断言 llm.calls 的测试不需要改。
+        """
+        resp = await self.chat(messages, tools)
+        if resp.content:
+            for i in range(0, len(resp.content), 3):
+                yield LLMDelta(content=resp.content[i:i + 3])
+        yield LLMDelta(
+            tool_calls=resp.tool_calls,
+            finish_reason=resp.finish_reason,
+            prompt_tokens=resp.prompt_tokens,
+            completion_tokens=resp.completion_tokens,
+        )
+
 
 class BoomLLM:
     async def chat(self, messages, tools=None):
         raise ConnectionError("模拟网络中断")
+
+    async def chat_stream(self, messages, tools=None):
+        raise ConnectionError("模拟网络中断")
+        yield  # pragma: no cover - 让这个函数成为 async generator
 
 
 def text(content: str, tokens: int = 10) -> LLMResponse:
