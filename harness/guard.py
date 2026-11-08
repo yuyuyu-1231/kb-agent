@@ -38,6 +38,9 @@ class StopReason(str, Enum):
     BUDGET_EXHAUSTED = "budget_exhausted"
     LOOP_DETECTED = "loop_detected"
     LLM_ERROR = "llm_error"
+    # 客户端断开连接。流式模式下用户关页面就会产生这个，
+    # 不单独标记的话 trace 里会写成 max_steps —— 那是误归因。
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)

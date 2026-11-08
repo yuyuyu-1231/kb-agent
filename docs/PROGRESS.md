@@ -347,6 +347,66 @@ user_memory 表：user_id, kind, content, updated_at
 
 ---
 
+## 第 4 轮：SSE 流式（已完成 11/8）
+
+### 一个架构决定：`run()` 必须是 `run_stream()` 的收集器
+
+最初打算“不动 `run`，新加 `run_stream`”。问题是：
+API 上线跑 `run_stream`，如果测试只覆盖 `run`，
+那 174 个测试守的就是一段**永远不会执行的代码**。
+
+改成：`run_stream` 是唯一实现，`run()` 消费它取 `done` 事件。
+
+**逻辑一行不重复，测试覆盖的就是上线路径。**
+
+### 实测事件流（单问题）
+
+```
+tool_call  × 2
+citation   × 2
+token      × 194     ← 真流式，不是跑完再切片
+done       × 1
+```
+
+### 中途断开：修了一个真 bug
+
+原本收口（`tracer.finish` / 写记忆）在循环**之后**。客户端断开时会跳过，
+导致 trace 残缺、对话不进历史。
+
+修复过程中发现两件只有真测才能发现的事：
+
+| # | 发现 | 后果 |
+|---|---|---|
+| 1 | **实际断连抛的是 `asyncio.CancelledError`，不是 `GeneratorExit`** | 只捕 `GeneratorExit` 会漏——trace 里的 `stop_reason` 会是初始值 `max_steps`（误归因） |
+| 2 | **task 被 cancel 后，`finally` 里的 `await` 会立即再抛 `CancelledError`** | `_remember` 里的 `await to_thread` 根本跑不完，记忆依旧丢 |
+
+**修法**：
+
+- `except (GeneratorExit, asyncio.CancelledError)`，**两者都重新抛**
+- `await asyncio.shield(self._remember(...))` —— 让内部协程在后台继续
+- 新增 `StopReason.CANCELLED`，不把断连归到 `max_steps`
+- `partial_text` 在循环外累积，保留已生成的部分
+
+**实测结果：**
+
+```
+断开前 trace 行数   948
+断开后 trace 行数   949
+stop_reason         cancelled        ✅
+会话记忆            2 条              ✅
+  user:      试用期员工能休年假吗？
+  assistant: 我先                        ← 模型刚生成的 2 个字
+```
+
+**最后那个“我先”很关键**：说明“保留已生成部分”是真的做了，
+而不是只写一句降级文案。
+
+> **这一条在面试里很值钱**：多数人只知道“客户端断开要 finally 收口”，
+> 不知道断连抛的是 `CancelledError` 而不是 `GeneratorExit`，
+> 更不知道 cancel 之后 `finally` 里的 `await` 会立即失败。
+
+---
+
 ## 下一步
 
 **已完成：documents + qa、长对话测试、熔断验证、工具扩展。**

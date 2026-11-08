@@ -278,6 +278,7 @@ _DEGRADE_TEXT: dict[StopReason, str] = {
     StopReason.BUDGET_EXHAUSTED: "本次查询涉及的内容超出处理预算，已停止。建议把问题拆小后再问。",
     StopReason.LOOP_DETECTED: "检测到重复的检索动作，为避免无效消耗已停止。建议补充更具体的信息，或提交工单。",
     StopReason.LLM_ERROR: "模型服务暂时不可用，请稍后重试。",
+    StopReason.CANCELLED: "本次回答被中断（连接已断开），已保留已生成的部分。",
 }
 
 
@@ -352,177 +353,237 @@ class AgentLoop:
         ticket_id: str | None = None
         stop_reason = StopReason.MAX_STEPS      # 兜底值，正常路径都会被覆盖
 
-        while True:
-            # ① 上下文裁剪
-            fit = self.context.fit(messages)
-            messages = fit.messages
-            # 注意：这里不用 fit.estimated_tokens 去更新 used_tokens。
-            # 两者语义不同：
-            #   fit.estimated_tokens = 本次请求的上下文**大小**
-            #   used_tokens          = 本次 run 的**累计消耗**
-            # 混用会把「上下文本身就很长」误判成「预算耗尽」——
-            # 实测 token_budget=50 时，光 system prompt 就 400 token，
-            # 于是第 0 轮就熔断，steps=0，模型一次都没被调用。
-            # 上下文超预算由 ContextManager 负责裁剪，不该由熔断兜。
-            if fit.trimmed:
-                tracer.step(
-                    thought="[context] " + "；".join(fit.actions),
-                    extra={
-                        "tokens_before": fit.original_tokens,
-                        "tokens_after": fit.estimated_tokens,
-                    },
-                )
+        cancelled = False
+        result: AgentResult | None = None
+        # 已生成的文本。在循环外累积，因为中断发生时 answer 还没被赋值，
+        # 而 finally 需要它 —— 否则降级文案里写的“已保留已生成的部分”是假的。
+        partial_text = ""
 
-            # ② 熔断检查：轮数 + 预算
-            decision = guard.check(used_tokens)
-            if not decision.allowed:
-                stop_reason = decision.reason or StopReason.MAX_STEPS
-                detail = decision.detail
-                break
+        try:
+            while True:
+                # ① 上下文裁剪
+                fit = self.context.fit(messages)
+                messages = fit.messages
+                # 注意：这里不用 fit.estimated_tokens 去更新 used_tokens。
+                # 两者语义不同：
+                #   fit.estimated_tokens = 本次请求的上下文**大小**
+                #   used_tokens          = 本次 run 的**累计消耗**
+                # 混用会把「上下文本身就很长」误判成「预算耗尽」——
+                # 实测 token_budget=50 时，光 system prompt 就 400 token，
+                # 于是第 0 轮就熔断，steps=0，模型一次都没被调用。
+                # 上下文超预算由 ContextManager 负责裁剪，不该由熔断兜。
+                if fit.trimmed:
+                    tracer.step(
+                        thought="[context] " + "；".join(fit.actions),
+                        extra={
+                            "tokens_before": fit.original_tokens,
+                            "tokens_after": fit.estimated_tokens,
+                        },
+                    )
 
-            # ③ 流式调模型：边收边发 token 事件
-            text_parts: list[str] = []
-            final_calls: list[ToolCall] = []
-            finish_reason = ""
-            prompt_tokens = 0
-            completion_tokens = 0
-            try:
-                async for delta in self.llm.chat_stream(
-                    messages, self.registry.schemas()
-                ):
-                    if delta.content:
-                        text_parts.append(delta.content)
-                        yield AgentEvent("token", {"text": delta.content})
-                    if delta.tool_calls:
-                        final_calls = delta.tool_calls
-                    if delta.finish_reason:
-                        finish_reason = delta.finish_reason
-                    if delta.prompt_tokens:
-                        prompt_tokens = delta.prompt_tokens
-                    if delta.completion_tokens:
-                        completion_tokens = delta.completion_tokens
-            except Exception as exc:  # noqa: BLE001 - 网络/限流都可能抛
-                stop_reason = StopReason.LLM_ERROR
-                detail = f"{type(exc).__name__}: {exc}"
-                tracer.step(tool="__llm__", ok=False, observation=detail)
-                break
-
-            response = LLMResponse(
-                content="".join(text_parts),
-                tool_calls=final_calls,
-                finish_reason=finish_reason or "stop",
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-
-            steps += 1
-            used_tokens += response.total_tokens
-
-            # ④ 没有工具调用 = 收敛
-            if not response.tool_calls:
-                answer = response.content or ""
-                if ticket_id:
-                    stop_reason = StopReason.TICKET_CREATED
-                else:
-                    stop_reason = StopReason.ANSWERED
-                tracer.step(thought=answer, tokens=response.total_tokens)
-                break
-
-            # ⑤ 把 assistant 消息写回历史，再逐个执行工具
-            messages.append(self._assistant_message(response))
-            tracer.step(
-                thought=response.content or "[决定调用工具]",
-                tokens=response.total_tokens,
-                extra={"tool_calls": [tc.name for tc in response.tool_calls]},
-            )
-
-            halted = False
-            for idx, tool_call in enumerate(response.tool_calls):
-                # ⑥ 重复动作检查
-                act = guard.check_action(tool_call.name, tool_call.arguments)
-                if not act.allowed:
-                    stop_reason = act.reason or StopReason.LOOP_DETECTED
-                    detail = act.detail
-                    # 为本次及后续未执行的 tool_calls 补占位消息，保持协议合法
-                    self._pad_skipped_tool_calls(messages, response.tool_calls, idx)
-                    halted = True
+                # ② 熔断检查：轮数 + 预算
+                decision = guard.check(used_tokens)
+                if not decision.allowed:
+                    stop_reason = decision.reason or StopReason.MAX_STEPS
+                    detail = decision.detail
                     break
 
-                # ⑦ 执行工具（失败已被 ToolRegistry 收敛成 ToolResult）
-                # 先发事件，前端能立刻显示“正在检索”，而不是等到工具跑完
-                yield AgentEvent("tool_call", {
-                    "name": tool_call.name,
-                    "arguments": tool_call.arguments,
-                })
-                
-                result = await self.registry.call(tool_call.name, tool_call.arguments)
-                
-                # 引用候选：分配全局稳定编号，并把 index 塞回给模型看的内容。
-                # 必须在写进 messages 之前做，否则模型看到的还是没有编号的版本。
-                spec = self.registry.get(tool_call.name)
-                has_citations = (
-                    result.ok and spec is not None and spec.citation_aware
-                )
-                if has_citations:
-                    before = len(citation_registry)
-                    result = self._annotate_citations(result, citation_registry)
-                    # 有新引用才推，避免每轮都把全量重发一遍
-                    if len(citation_registry) > before:
-                        yield AgentEvent("citation", {
-                            "citations": [
-                                c.to_dict() for c in citation_registry.all()
-                            ],
-                        })
+                # ③ 流式调模型：边收边发 token 事件
+                text_parts: list[str] = []
+                final_calls: list[ToolCall] = []
+                finish_reason = ""
+                prompt_tokens = 0
+                completion_tokens = 0
+                try:
+                    async for delta in self.llm.chat_stream(
+                        messages, self.registry.schemas()
+                    ):
+                        if delta.content:
+                            text_parts.append(delta.content)
+                            partial_text += delta.content
+                            yield AgentEvent("token", {"text": delta.content})
+                        if delta.tool_calls:
+                            final_calls = delta.tool_calls
+                        if delta.finish_reason:
+                            finish_reason = delta.finish_reason
+                        if delta.prompt_tokens:
+                            prompt_tokens = delta.prompt_tokens
+                        if delta.completion_tokens:
+                            completion_tokens = delta.completion_tokens
+                except Exception as exc:  # noqa: BLE001 - 网络/限流都可能抛
+                    stop_reason = StopReason.LLM_ERROR
+                    detail = f"{type(exc).__name__}: {exc}"
+                    tracer.step(tool="__llm__", ok=False, observation=detail)
+                    break
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result.to_message_content(),
-                })
+                response = LLMResponse(
+                    content="".join(text_parts),
+                    tool_calls=final_calls,
+                    finish_reason=finish_reason or "stop",
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+
+                steps += 1
+                used_tokens += response.total_tokens
+
+                # ④ 没有工具调用 = 收敛
+                if not response.tool_calls:
+                    answer = response.content or ""
+                    if ticket_id:
+                        stop_reason = StopReason.TICKET_CREATED
+                    else:
+                        stop_reason = StopReason.ANSWERED
+                    tracer.step(thought=answer, tokens=response.total_tokens)
+                    break
+
+                # ⑤ 把 assistant 消息写回历史，再逐个执行工具
+                messages.append(self._assistant_message(response))
                 tracer.step(
-                    tool=tool_call.name,
-                    args=tool_call.arguments,
-                    ok=result.ok,
-                    latency_ms=result.latency_ms,
-                    observation=result.content if result.ok else result.error,
-                    extra={"citations_total": len(citation_registry)}
-                    if has_citations else None,
+                    thought=response.content or "[决定调用工具]",
+                    tokens=response.total_tokens,
+                    extra={"tool_calls": [tc.name for tc in response.tool_calls]},
                 )
 
-                # ⑧ 工单号（create_ticket 第 3 周才实现，先把接口留着）
-                if result.ok and not has_citations and tool_call.name == "create_ticket":
-                    ticket_id = self._extract_ticket_id(result.content)
+                halted = False
+                for idx, tool_call in enumerate(response.tool_calls):
+                    # ⑥ 重复动作检查
+                    act = guard.check_action(tool_call.name, tool_call.arguments)
+                    if not act.allowed:
+                        stop_reason = act.reason or StopReason.LOOP_DETECTED
+                        detail = act.detail
+                        # 为本次及后续未执行的 tool_calls 补占位消息，保持协议合法
+                        self._pad_skipped_tool_calls(messages, response.tool_calls, idx)
+                        halted = True
+                        break
 
-            if halted:
-                break
+                    # ⑦ 执行工具（失败已被 ToolRegistry 收敛成 ToolResult）
+                    # 先发事件，前端能立刻显示“正在检索”，而不是等到工具跑完
+                    yield AgentEvent("tool_call", {
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    })
 
-            guard.begin_step()
+                    result = await self.registry.call(
+                        tool_call.name, tool_call.arguments
+                    )
 
-        # ⑨ 收口
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        if not answer:
-            answer = _DEGRADE_TEXT.get(stop_reason, "处理未完成。")
+                    # 引用候选：分配全局稳定编号，并把 index 塞回给模型看的内容。
+                    # 必须在写进 messages 之前做，否则模型看到的还是没有编号的版本。
+                    spec = self.registry.get(tool_call.name)
+                    has_citations = (
+                        result.ok and spec is not None and spec.citation_aware
+                    )
+                    if has_citations:
+                        before = len(citation_registry)
+                        result = self._annotate_citations(result, citation_registry)
+                        # 有新引用才推，避免每轮都把全量重发一遍
+                        if len(citation_registry) > before:
+                            yield AgentEvent("citation", {
+                                "citations": [
+                                    c.to_dict() for c in citation_registry.all()
+                                ],
+                            })
 
-        tracer.finish(
-            stop_reason=stop_reason.value,
-            answer=answer,
-            tokens=used_tokens,
-            ticket_id=ticket_id,
-            extra={"steps": steps, "detail": detail},
-        )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result.to_message_content(),
+                    })
+                    tracer.step(
+                        tool=tool_call.name,
+                        args=tool_call.arguments,
+                        ok=result.ok,
+                        latency_ms=result.latency_ms,
+                        observation=result.content if result.ok else result.error,
+                        extra={"citations_total": len(citation_registry)}
+                        if has_citations else None,
+                    )
 
-        # ⑩ 写记忆（只记有结果的对话，失败的不污染下一轮上下文）
-        if self.memory and session_id and stop_reason in (
-            StopReason.ANSWERED,
-            StopReason.TICKET_CREATED,
-        ):
-            await self._remember(session_id, question, answer)
+                    # ⑧ 工单号
+                    if (
+                        result.ok
+                        and not has_citations
+                        and tool_call.name == "create_ticket"
+                    ):
+                        ticket_id = self._extract_ticket_id(result.content)
 
-        # 只返回答案里真正引用到的条目：拒答时天然为空
-        citations = citation_registry.referenced_by(answer)
+                if halted:
+                    break
 
-        yield AgentEvent("done", {
-            "result": AgentResult(
+                guard.begin_step()
+
+        except (GeneratorExit, asyncio.CancelledError):
+            # 客户端断开有两条路径，抛的异常类型不一样：
+            #   - 主动 aclose()      → GeneratorExit
+            #   - Starlette 取消 task → asyncio.CancelledError
+            # 实测下来 HTTP 断连走的是后者，只捕 GeneratorExit 会漏。
+            # 两者都是 BaseException 子类，不会被上面的 except Exception 吃掉。
+            #
+            # **必须重新抛**：吞掉 CancelledError 会让 asyncio 以为任务
+            # 拒绝取消，从此再也不会被取消；吞掉 GeneratorExit 会让
+            # generator 无法正确关闭。
+            cancelled = True
+            raise
+        finally:
+            # 收口放在 finally：正常结束 / 异常 / 客户端断开，三种情况都要执行。
+            # 之前放在循环后面，用户一关页面，trace 和记忆就全丢了。
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if cancelled:
+                stop_reason = StopReason.CANCELLED
+                detail = detail or "客户端断开连接"
+                # 保留已生成的部分，而不是只写一句降级文案。
+                # 用户下次回来能看到自己上次问到了哪里。
+                if partial_text:
+                    answer = partial_text
+
+            if not answer:
+                answer = _DEGRADE_TEXT.get(stop_reason, "处理未完成。")
+
+            try:
+                tracer.finish(
+                    stop_reason=stop_reason.value,
+                    answer=answer,
+                    tokens=used_tokens,
+                    ticket_id=ticket_id,
+                    extra={
+                        "steps": steps,
+                        "detail": detail,
+                        "cancelled": cancelled,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                # 收口阶段写文件失败不该让请求崩，尤其是 aclose 时
+                pass
+
+            # cancelled 也写记忆：用户确实问了，只是没看到完整回答。
+            # 不写的话，他下次回来这轮对话就凭空消失了。
+            if self.memory and session_id and stop_reason in (
+                StopReason.ANSWERED,
+                StopReason.TICKET_CREATED,
+                StopReason.CANCELLED,
+            ):
+                try:
+                    # 为什么要 shield：task 被 cancel 后，任务内任何 await
+                    # 都会**立即**再抛 CancelledError。不加 shield 的话，
+                    # _remember 里的 await to_thread 根本跑不完，记忆依旧丢。
+                    # shield 让内部协程在后台继续，外层立即拿到取消信号。
+                    await asyncio.shield(
+                        self._remember(session_id, question, answer)
+                    )
+                except asyncio.CancelledError:
+                    # shield 在外层被取消时立即抛 CancelledError，
+                    # 但内部协程仍在后台跑。这里吃掉它，
+                    # 让 finally 能完整走完（构造 result）。
+                    pass
+                except Exception:  # noqa: BLE001
+                    # aclose() 时事件循环可能正在关闭，await 会抛
+                    # RuntimeError("Event loop is closed")。
+                    # 记忆写不进去比整个请求崩掉好。
+                    pass
+
+            citations = citation_registry.referenced_by(answer)
+            result = AgentResult(
                 answer=answer,
                 stop_reason=stop_reason,
                 trace_id=tracer.trace_id,
@@ -533,8 +594,13 @@ class AgentLoop:
                 tokens=used_tokens,
                 detail=detail,
                 session_id=session_id,
-            ),
-        })
+            )
+
+        # 只有正常路径才发 done。
+        # cancelled 时上面会 raise，走不到这里 —— 这正是想要的：
+        # 客户端已经断了，再 yield 也没人收。
+        if not cancelled and result is not None:
+            yield AgentEvent("done", {"result": result})
 
     async def run(self, question: str, session_id: str = "") -> AgentResult:
         """非流式入口：消费 run_stream，取 done 事件里的结果。
