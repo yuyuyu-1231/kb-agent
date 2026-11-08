@@ -78,3 +78,29 @@ def register_knowledge_tools(registry: ToolRegistry, retriever: Retriever) -> No
             page_no: 页码。从 search_knowledge 结果的 page_no 字段获取。
         """
         return await retriever.get_page(doc_id, page_no)
+
+    @registry.tool(timeout=10)
+    async def list_documents() -> list[dict[str, Any]]:
+        """列出知识库中已收录的所有文档。
+
+        什么时候用：
+        - 用户问“你们有哪些制度”“都收录了什么文档”
+        - 你不确定该在哪份文档里找，想先看看范围
+
+        什么时候不用：
+        - 能直接检索到内容时，不要先调这个再调 search_knowledge
+          （多一轮调用 = 多一次延迟，且很可能没必要）
+
+        不需要参数。
+        如果知识库为空，返回空列表。
+        """
+        docs = await retriever.store.list_documents()
+        return [
+            {
+                "doc_id": d.get("doc_id", ""),
+                "doc_name": d.get("doc_name", ""),
+                "page_count": d.get("page_count", 0),
+                "chunk_count": d.get("chunk_count", 0),
+            }
+            for d in docs
+        ]

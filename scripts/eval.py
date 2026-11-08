@@ -53,6 +53,7 @@ from app.services.evaluation import (                       # noqa: E402
 from app.services.retrieval import Retriever                # noqa: E402
 from app.services.ticket import TicketStore                 # noqa: E402
 from app.tools.knowledge import register_knowledge_tools    # noqa: E402
+from app.tools.misc import register_misc_tools              # noqa: E402
 from app.tools.ticket import register_ticket_tools          # noqa: E402
 from harness.loop import DEFAULT_SYSTEM_PROMPT, AgentLoop   # noqa: E402
 from harness.tools import ToolRegistry                      # noqa: E402
@@ -385,6 +386,7 @@ async def main(limit: int | None, set_name: str) -> None:
     registry = ToolRegistry()
     register_knowledge_tools(registry, retriever)
     register_ticket_tools(registry, ticket_store)
+    register_misc_tools(registry)
 
     llm = OpenAILLMClient.from_settings(settings)
     loop = AgentLoop(
@@ -429,6 +431,9 @@ async def main(limit: int | None, set_name: str) -> None:
             "token_budget": settings.token_budget,
             "top_k": 5,
             "eval_set_size": total,
+            # 工具数量记进报告：4 → 6 的对比靠这个字段区分
+            "tool_count": len(registry),
+            "tools": registry.names(),
         },
         "summary": aggregate(results),
         "by_type": aggregate_by_type(results),

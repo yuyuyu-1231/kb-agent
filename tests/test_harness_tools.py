@@ -144,15 +144,33 @@ def test_duplicate_registration_raises(registry: ToolRegistry) -> None:
         registry.register(dup, name="search_knowledge")
 
 
-def test_paramless_tool_rejected() -> None:
+def test_paramless_tool_registers() -> None:
+    """无参工具是合法的。
+
+    这条原来叫 test_paramless_tool_rejected，断言“没有参数就 raise”。
+    加 `list_documents` / `current_time` 时放开了这个限制——
+    一个不需要参数的函数完全可以是个好工具（“列出所有文档”就不需要参数）。
+
+    现在守的是另一件事：**空参数的 schema 形状必须正确**，
+    必须是 `{"type": "object", "properties": {}, "required": []}`，
+    而不是缺 `properties` 键或者值为 None —— 部分网关会因此报错。
+    """
     reg = ToolRegistry()
 
     def no_params() -> str:
         """没有参数。"""
         return ""
 
-    with pytest.raises(ValueError, match="没有任何可用参数"):
-        reg.register(no_params)
+    spec = reg.register(no_params)
+
+    assert spec.name == "no_params"
+    assert spec.parameters == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    # 注册后能被调用（空参数）
+    assert "no_params" in reg
 
 
 # --------------------------------------------------------------------------- #

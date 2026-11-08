@@ -252,21 +252,26 @@ class ToolRegistry:
             default = param.default if param.default is not inspect.Parameter.empty else ...
             fields[pname] = (annotation, default)
 
-        if not fields:
-            raise ValueError(f"工具 {tool_name} 没有任何可用参数")
-
-        # 用 pydantic 动态建模型：注解解析、Optional、Literal、Enum、默认值
-        # 全部交给 pydantic，比自己遍历 typing 分支可靠得多
-        validator = create_model(f"{tool_name}_Args", **fields)  # type: ignore[call-overload]
-
-        raw_schema = validator.model_json_schema()
-        raw_schema = _inline_refs(raw_schema)
-        raw_schema = _strip_titles(raw_schema)
+        # 无参工具是合法的（例如“列出所有文档”“获取当前时间”）。
+        # 不要在这里 raise —— 一个不需要参数的函数完全可以是一个好工具。
+        validator = create_model(f"{tool_name}_Args", **fields)
 
         description, param_docs = _parse_docstring(inspect.getdoc(fn))
 
+        if fields:
+            # 用 pydantic 动态建模型：注解解析、Optional、Literal、Enum、默认值
+            # 全部交给 pydantic，比自己遍历 typing 分支可靠得多
+            raw_schema = validator.model_json_schema()
+            raw_schema = _inline_refs(raw_schema)
+            raw_schema = _strip_titles(raw_schema)
+            props = raw_schema.get("properties", {})
+            required = raw_schema.get("required", [])
+        else:
+            # 空模型不生成 properties，手写一个空 object
+            props = {}
+            required = []
+
         # 把 docstring 里的参数说明补进 schema
-        props = raw_schema.get("properties", {})
         for pname, pdesc in param_docs.items():
             if pname in props:
                 props[pname]["description"] = pdesc
@@ -274,7 +279,7 @@ class ToolRegistry:
         parameters = {
             "type": "object",
             "properties": props,
-            "required": raw_schema.get("required", []),
+            "required": required,
         }
 
         spec = ToolSpec(

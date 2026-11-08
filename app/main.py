@@ -40,6 +40,7 @@ from app.infra.qdrant import QdrantStore
 from app.services.retrieval import Retriever
 from app.services.ticket import TicketStore
 from app.tools.knowledge import register_knowledge_tools
+from app.tools.misc import register_misc_tools
 from app.tools.ticket import register_ticket_tools
 from harness.loop import AgentLoop
 from harness.memory import SessionMemory
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI):
     registry = ToolRegistry()
     register_knowledge_tools(registry, retriever)
     register_ticket_tools(registry, tickets)
+    register_misc_tools(registry)
 
     llm = OpenAILLMClient.from_settings(settings)
     loop = AgentLoop(
