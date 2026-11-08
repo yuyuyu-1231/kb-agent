@@ -1,6 +1,6 @@
 # 进度快照
 
-> 最近更新：2026-11-07 晚
+> 最近更新：2026-11-08 晚
 > **下次开工先看这里。** 细节在 SPEC / BASELINE / ROBUSTNESS_SAFETY / GLOSSARY 里。
 
 ## 一句话状态
@@ -409,12 +409,37 @@ stop_reason         cancelled        ✅
 
 ## 下一步
 
-**已完成：documents + qa、长对话测试、熔断验证、工具扩展。**
-
-**第 3 周的任务全部完成。剩余：**
+**后端全部完成（11/8）。只剩前端。**
 
 | 顺序 | 任务 | 说明 |
 |---|---|---|
-| 1 | SSE 流式（第 4 轮） | 约束 C8；需改 `llm.py` + `loop.py` |
-| 2 | 前端（第 5 轮） | 约束 C9/C10 |
-| 3 | **评估集扩样（建议）** | 50 条方差太大，A/B 结论不可靠。至少扩到 150 条，或改成分组对比 |
+| 1 | **前端**（第 5 轮） | 约束 C9/C10 |
+| 2 | 部署 | Dockerfile + 公网地址，让面试官能点开 |
+| 3 | 评估集扩样（建议） | 50 条方差太大，A/B 结论不可靠 |
+
+### 明天开工第一件事：`app/static/index.html`
+
+四个区块（约束 C9/C10）：
+
+| 区块 | 对接 | 要点 |
+|---|---|---|
+| 上传面板 | `POST /documents/upload` | 显示 `chunk_count`；幂等重传应返回相同结果 |
+| 问答区 | `POST /qa/ask/stream` | **`fetch + ReadableStream` 手工解析 SSE**（不能用 `EventSource`，因为我们用 POST） |
+| trace 面板 | 从 SSE 的 `tool_call` 事件累积 | 可折叠列表，显示工具名 + 参数 |
+| 评估页 | `GET /documents` + 静态报告 | 指标打表 |
+
+**前端解析 SSE 的关键**（网络分片不保证按事件边界到达）：
+
+```javascript
+let buf = "";
+while (true) {
+  const {done, value} = await reader.read();
+  if (done) break;
+  buf += decoder.decode(value, {stream: true});
+  const parts = buf.split("\n\n");
+  buf = parts.pop();           // ← 最后一段可能不完整，留着
+  for (const part of parts) { /* 解析 event: / data: */ }
+}
+```
+
+**不这么做会怎样**：一个事件被网络切成两块，`JSON.parse` 直接抛异常，表现为“偶尔丢字”。
