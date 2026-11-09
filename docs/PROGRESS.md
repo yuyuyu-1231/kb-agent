@@ -407,6 +407,75 @@ stop_reason         cancelled        ✅
 
 ---
 
+## 第 5 轮：前端（已完成 11/9）
+
+`app/static/index.html`，703 行单文件，零构建。`GET /` 返回它。
+
+### 实测结果（Playwright + 系统 Edge）
+
+| 检查项 | 结果 |
+|---|---|
+| 页面加载 | ✅ |
+| **流式逐字增长** | ✅ 采样到 6–8 个不同长度值（21 → 71 → 138 → … → 368） |
+| tool_call 累积渲染 | ✅ 4 条 |
+| 多轮会话 | ✅ session_id 保存，第二轮带上上下文 |
+| 停止按钮（前端断连） | ✅ 页面不崩、显示中断提示 |
+| JS 错误 | ✅ 无 |
+| **citation 渲染** | ❌ **未验到**（见下） |
+
+### citation 未验的原因：环境，不是代码
+
+Qdrant 在这台机器上**反复崩溃**：
+
+```
+Docker Desktop 启动 → 吃 3.8 GB（可用内存 5379 → 1576 MB）
+→ Qdrant 容器起来 → 几十秒后 daemon 退出（WSL 发行版 Stopped）
+```
+
+服务端因此一直报 `degraded`，检索全部失败，**没有引用可渲染**。
+
+**但降级路径反而被验证了**：Qdrant 不可用时，Agent 会
+（1）尝试 3 次检索、（2）如实说“检索服务故障，不是手册没有”、
+（3）自动建 P1 故障工单。**这比正常路径更能说明系统是抗造的。**
+
+### 三个实现细节
+
+1. **答案区流式用 `insertAdjacentText`**，不重建 DOM
+   （每个 token 都 `innerHTML = ...` 会重排整棵树）
+2. **`done` 后做一次极简 Markdown 渲染**（加粗/列表/换行）
+   流式期间纯文本，因为半截的 `**` 渲染出来是脏的
+3. **SSE 解析要留不完整的尾巴**
+
+```javascript
+const parts = buf.split("\n\n");
+buf = parts.pop();          // 最后一段可能不完整
+```
+
+**不这么做**：事件被网络切成两块时 `JSON.parse` 抛异常，表现为“偶尔丢字”。
+
+### 顺手修的两个真 bug
+
+| bug | 后果 | 修法 |
+|---|---|---|
+| `lifespan` 里 `ensure_collection()` 硬失败 | Qdrant 不在 → **整个服务起不来** → 前端连页面都打不开 | 降级启动，`/health` 报 degraded |
+| 健康检查缓存“启动时失败” | Docker 晚起 3 秒，`/health` 就**永远** degraded | 每次真实探，加 3 秒超时 |
+
+### 演示前必须做的一件事
+
+**先确认 Docker 稳定再起服务**：
+
+```powershell
+docker ps                                    # daemon 活着
+docker start kb-qdrant
+# 连续 3 次成功才算稳定
+1..3 | % { Invoke-RestMethod http://127.0.0.1:6333/healthz; Start-Sleep 2 }
+```
+
+**内存不够时**：先停 Python 服务（BGE 占几百 MB）再起 Docker，
+反过来内存会不够。
+
+---
+
 ## 下一步
 
 **后端全部完成（11/8）。只剩前端。**

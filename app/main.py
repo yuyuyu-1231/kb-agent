@@ -28,9 +28,12 @@ lifespan 只在真正 `uvicorn` 启动时执行，测试里可以完全不触发
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import documents, health, qa
 from app.core.config import get_settings
@@ -46,6 +49,9 @@ from harness.loop import AgentLoop
 from harness.memory import SessionMemory
 from harness.tools import ToolRegistry
 
+# app/main.py -> app -> static
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -54,7 +60,23 @@ async def lifespan(app: FastAPI):
 
     embedder = Embedder.from_settings(settings)
     vector_store = QdrantStore.from_settings(settings)
-    await vector_store.ensure_collection()
+
+    # 依赖不可用不应该让**进程**起不来。
+    #
+    # 实测踩过：Docker Desktop 隔夜退出，Qdrant 连不上，
+    # `await ensure_collection()` 直接抛 —— FastAPI lifespan 失败 →
+    # 整个服务退出 → 前端连页面都打不开，用户看到的是“拒绝连接”。
+    #
+    # 降级启动：/health 报 degraded，业务接口返回明确错误，
+    # 至少页面能打开、能看到“知识库不可用”而不是一片空白。
+    store_ready = True
+    store_error = ""
+    try:
+        await vector_store.ensure_collection()
+    except Exception as exc:  # noqa: BLE001
+        store_ready = False
+        store_error = f"{type(exc).__name__}: {exc}"
+        print(f"[WARN] Qdrant 不可用，降级启动：{store_error}")
 
     retriever = Retriever.from_infra(embedder, vector_store)
     tickets = TicketStore(settings.sqlite_path)
@@ -77,6 +99,8 @@ async def lifespan(app: FastAPI):
     )
 
     app.state.settings = settings
+    app.state.store_ready = store_ready
+    app.state.store_error = store_error
     app.state.embedder = embedder
     app.state.vector_store = vector_store
     app.state.retriever = retriever
@@ -110,6 +134,16 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(documents.router)
     app.include_router(qa.router)
+
+    # 静态资源：前端是单文件 HTML，零构建。
+    # mount 必须在路由之后：先匹配具体路由，剩下的才落到静态目录。
+    if STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+        @app.get("/", include_in_schema=False)
+        async def index() -> FileResponse:
+            """返回单页应用。不进 OpenAPI 文档 —— 它不是 API。"""
+            return FileResponse(STATIC_DIR / "index.html")
 
     return app
 

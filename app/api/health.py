@@ -41,11 +41,28 @@ async def health(
         asyncio.to_thread(tickets.stats),
         asyncio.to_thread(memory.stats),
     )
-    chunks = await retriever.store.count()
+
+    # 每次健康检查都**真实探一次**，不缓存“启动时失败”这个结论。
+    #
+    # 为什么必须实时探：Qdrant 可能在服务启动后才恢复。
+    # 之前按启动状态缓存，导致“Docker 晚了几秒，/health 就永远 degraded”。
+    #
+    # 为什么加 3 秒超时：客户端本身 timeout=30s，
+    # 不加超时的话 Qdrant 挂掉时每次 /health 都要卡 30 秒，
+    # 前端轮询会堆积。3 秒足够本地 Qdrant 应答。
+    chunks = 0
+    detail = ""
+    try:
+        chunks = await asyncio.wait_for(retriever.store.count(), timeout=3.0)
+        ready = True
+    except Exception as exc:  # noqa: BLE001 - 超时 / 连接拒绝 / 服务异常
+        ready = False
+        detail = f"向量库不可用：{type(exc).__name__}"
 
     return HealthResponse(
-        status="ok",
+        status="ok" if ready else "degraded",
         chunks=chunks,
         tickets=int(ticket_stats.get("total", 0)),
         sessions=int(session_stats.get("sessions", 0)),
+        detail=detail,
     )

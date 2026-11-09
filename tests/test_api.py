@@ -24,16 +24,19 @@ from harness.memory import SessionMemory
 # --------------------------------------------------------------------------- #
 
 class _FakeVectorStore:
-    def __init__(self, count: int) -> None:
+    def __init__(self, count: int, fail: bool = False) -> None:
         self._count = count
+        self._fail = fail
 
     async def count(self) -> int:
+        if self._fail:
+            raise ConnectionError("模拟 Qdrant 不可用")
         return self._count
 
 
 class _FakeRetriever:
-    def __init__(self, count: int = 14) -> None:
-        self.store = _FakeVectorStore(count)
+    def __init__(self, count: int = 14, fail: bool = False) -> None:
+        self.store = _FakeVectorStore(count, fail=fail)
 
 
 class _FakeTicketStore:
@@ -57,8 +60,13 @@ def _client(
     retriever=None,
     tickets=None,
     memory=None,
+    store_ready: bool = True,
+    store_error: str = "",
 ) -> TestClient:
     app = create_app()
+    # lifespan 不会跑（TestClient 没进 with），但要模拟它设置过的状态
+    app.state.store_ready = store_ready
+    app.state.store_error = store_error
     app.dependency_overrides[get_retriever] = lambda: retriever or _FakeRetriever()
     app.dependency_overrides[get_ticket_store] = lambda: tickets or _FakeTicketStore()
     app.dependency_overrides[get_memory] = lambda: memory or _FakeMemory()
@@ -79,7 +87,29 @@ def test_health_ok() -> None:
         "chunks": 14,
         "tickets": 3,
         "sessions": 5,
+        "detail": "",
     }
+
+
+def test_health_degraded_when_store_unreachable() -> None:
+    """Qdrant 连不上 → 进程仍然活着，报 degraded。
+
+    这条守的是一个真实事故：Docker 隔夜退出后，`ensure_collection()`
+    在 lifespan 里抛异常 → 整个服务退出 → 前端连页面都打不开。
+    现在降级启动，至少能告警告清楚。
+
+    注意：健康检查是**实时探**的，不是读启动时缓存的标志 ——
+    所以这里要真抛异常，而不是传一个 store_ready=False。
+    （曾经缓存过，后果是 Docker 晚起几秒，/health 就永远 degraded。）
+    """
+    client = _client(retriever=_FakeRetriever(count=0, fail=True))
+    resp = client.get("/health")
+
+    assert resp.status_code == 200          # 仍然 200，不让编排系统杀实例
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["chunks"] == 0
+    assert "ConnectionError" in body["detail"]
 
 
 def test_health_with_empty_index_still_200() -> None:

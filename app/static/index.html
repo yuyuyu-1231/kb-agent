@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>kb-agent · 企业知识库问答</title>
+<style>
+  :root {
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --border: #e2e8f0;
+    --text: #1e293b;
+    --muted: #64748b;
+    --primary: #2563eb;
+    --primary-dim: #dbeafe;
+    --danger: #dc2626;
+    --ok: #16a34a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    font-size: 14px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  #health {
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  #health .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); display: inline-block;
+  }
+  #health .dot.ok { background: var(--ok); }
+  #health .dot.bad { background: var(--danger); }
+
+  main { flex: 1; display: flex; min-height: 0; }
+
+  aside {
+    width: 340px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--card);
+    padding: 16px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  aside section h2 {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 8px;
+  }
+
+  #dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 20px 12px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: .15s;
+  }
+  #dropzone:hover, #dropzone.drag {
+    border-color: var(--primary);
+    background: var(--primary-dim);
+    color: var(--primary);
+  }
+  #dropzone input { display: none; }
+
+  .doc-item {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  .doc-item .name { font-weight: 500; }
+  .doc-item .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  #session-info {
+    font-size: 12px;
+    color: var(--muted);
+    word-break: break-all;
+    line-height: 1.6;
+  }
+  #session-info code {
+    background: var(--bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+  }
+
+  #chat-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .msg { max-width: 780px; }
+  .msg.user { align-self: flex-end; }
+  .msg.user .bubble {
+    background: var(--primary);
+    color: white;
+    border-radius: 12px 12px 2px 12px;
+  }
+  .msg.agent .bubble {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px 12px 12px 2px;
+  }
+  .bubble { padding: 12px 16px; line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; }
+  .bubble strong { font-weight: 600; }
+  .bubble ul { margin: 6px 0 6px 20px; }
+
+  .msg-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+    padding: 0 4px;
+  }
+
+  .citations {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .citation {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  .citation .head {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    color: var(--muted);
+  }
+  .citation .idx {
+    background: var(--primary-dim);
+    color: var(--primary);
+    border-radius: 4px;
+    padding: 0 6px;
+    font-weight: 600;
+  }
+  .citation .snippet { margin-top: 4px; color: var(--text); opacity: .8; line-height: 1.5; }
+
+  #composer {
+    border-top: 1px solid var(--border);
+    background: var(--card);
+    padding: 12px 20px;
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  #question {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    resize: none;
+    outline: none;
+    line-height: 1.5;
+    max-height: 120px;
+  }
+  #question:focus { border-color: var(--primary); }
+  button {
+    border: none;
+    border-radius: 8px;
+    padding: 0 18px;
+    font-size: 14px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: .15s;
+  }
+  #send { background: var(--primary); color: white; }
+  #send:hover:not(:disabled) { background: #1d4ed8; }
+  #send:disabled { opacity: .5; cursor: not-allowed; }
+  #stop { background: var(--danger); color: white; display: none; }
+
+  #trace-panel {
+    border-top: 1px solid var(--border);
+    background: var(--card);
+    flex-shrink: 0;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  #trace-panel summary {
+    padding: 8px 20px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--muted);
+    user-select: none;
+  }
+  #trace-list { padding: 0 20px 12px; display: flex; flex-direction: column; gap: 4px; }
+  .trace-step {
+    font-size: 12px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    background: var(--bg);
+    border-radius: 4px;
+    padding: 5px 8px;
+    color: var(--muted);
+    word-break: break-all;
+  }
+  .trace-step .tool { color: var(--primary); font-weight: 600; }
+
+  .err {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: var(--danger);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    white-space: pre-wrap;
+  }
+
+  .cursor::after {
+    content: "▌";
+    animation: blink 1s step-end infinite;
+    color: var(--primary);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .empty { color: var(--muted); text-align: center; padding: 40px 20px; font-size: 13px; line-height: 1.8; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>kb-agent</h1>
+  <span class="sub">企业知识库 Agent · 检索 + 引用 + 转工单</span>
+  <span class="spacer"></span>
+  <div id="health">
+    <span class="dot" id="health-dot"></span>
+    <span id="health-text">连接中…</span>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <section>
+      <h2>上传文档</h2>
+      <label id="dropzone" for="file-input">
+        点击或拖拽 PDF 到这里<br>
+        <span style="font-size:11px">限 50 页 / 20 MB</span>
+      </label>
+      <input type="file" id="file-input" accept="application/pdf">
+    </section>
+
+    <section>
+      <h2>知识库</h2>
+      <div id="doc-list"><div class="empty" style="padding:12px">加载中…</div></div>
+    </section>
+
+    <section>
+      <h2>当前会话</h2>
+      <div id="session-info">还没有会话。问第一句时会自动创建。</div>
+    </section>
+  </aside>
+
+  <section id="chat-panel">
+    <div id="messages">
+      <div class="empty">
+        问点什么试试：<br>
+        「试用期员工能休年假吗？」<br>
+        「出差住宿标准是多少？」<br>
+        「公司年终奖怎么发？」
+      </div>
+    </div>
+
+    <div id="composer">
+      <textarea id="question" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+      <button id="send">发送</button>
+      <button id="stop">停止</button>
+    </div>
+
+    <details id="trace-panel">
+      <summary>Agent 轨迹（tool_call 事件累积）</summary>
+      <div id="trace-list"><div class="empty" style="padding:8px 0">还没有工具调用</div></div>
+    </details>
+  </section>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// 状态
+// ---------------------------------------------------------------------------
+const state = {
+  sessionId: null,
+  streaming: false,
+  controller: null,     // AbortController，用于「停止」
+};
+
+const $ = (id) => document.getElementById(id);
+const el = {
+  messages: $("messages"),
+  question: $("question"),
+  send: $("send"),
+  stop: $("stop"),
+  traceList: $("trace-list"),
+  docList: $("doc-list"),
+  sessionInfo: $("session-info"),
+  healthDot: $("health-dot"),
+  healthText: $("health-text"),
+  dropzone: $("dropzone"),
+  fileInput: $("file-input"),
+};
+
+// ---------------------------------------------------------------------------
+// 工具函数
+// ---------------------------------------------------------------------------
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** 流式时纯文本追加；done 后做一次极简渲染（加粗 / 列表 / 换行）。
+ *  先 escape 再替换，顺序反了会有 XSS。 */
+function miniMarkdown(text) {
+  let html = escapeHtml(text);
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // 连续的 "- xxx" 行包成 <ul>
+  html = html.replace(/(?:^|\n)((?:[-*] .+\n?)+)/g, (m, block) => {
+    const items = block.trim().split("\n")
+      .map(l => `<li>${l.replace(/^[-*] /, "")}</li>`).join("");
+    return `\n<ul>${items}</ul>`;
+  });
+  html = html.replace(/\n/g, "<br>");
+  return html;
+}
+
+function scrollToBottom() {
+  el.messages.scrollTop = el.messages.scrollHeight;
+}
+
+function setStreaming(on) {
+  state.streaming = on;
+  el.send.disabled = on;
+  el.send.style.display = on ? "none" : "inline-block";
+  el.stop.style.display = on ? "inline-block" : "none";
+}
+
+// ---------------------------------------------------------------------------
+// 健康检查 & 文档列表
+// ---------------------------------------------------------------------------
+async function refreshHealth() {
+  try {
+    const r = await fetch("/health");
+    const d = await r.json();
+    if (d.status === "ok") {
+      el.healthDot.className = "dot ok";
+      el.healthText.textContent = `${d.chunks} chunks · ${d.tickets} 工单`;
+    } else {
+      // degraded：进程活着但向量库不可用。把原因直接显示出来，
+      // 比只显示一个红点有用得多。
+      el.healthDot.className = "dot bad";
+      el.healthText.textContent = `降级：${(d.detail || "知识库不可用").slice(0, 60)}`;
+    }
+  } catch (e) {
+    el.healthDot.className = "dot bad";
+    el.healthText.textContent = "服务不可用";
+  }
+}
+
+async function refreshDocs() {
+  try {
+    const r = await fetch("/documents");
+    const d = await r.json();
+    if (!d.items.length) {
+      el.docList.innerHTML = '<div class="empty" style="padding:12px">还没有文档</div>';
+      return;
+    }
+    el.docList.innerHTML = d.items.map(doc => `
+      <div class="doc-item">
+        <div class="name">${escapeHtml(doc.doc_name || doc.doc_id)}</div>
+        <div class="meta">${doc.page_count} 页 · ${doc.chunk_count} chunks</div>
+      </div>
+    `).join("");
+  } catch (e) {
+    el.docList.innerHTML = '<div class="empty" style="padding:12px">加载失败</div>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 上传
+// ---------------------------------------------------------------------------
+async function uploadFile(file) {
+  if (!file) return;
+  el.dropzone.textContent = `上传中：${file.name} …`;
+
+  const form = new FormData();
+  form.append("file", file);
+
+  try {
+    const r = await fetch("/documents/upload", { method: "POST", body: form });
+    const d = await r.json();
+
+    if (!r.ok) {
+      // 413 / 422 都会带 detail
+      el.dropzone.textContent = `上传失败：${d.detail || r.status}`;
+      return;
+    }
+    el.dropzone.textContent =
+      `已入库：${d.document_id}（${d.chunk_count} chunks，${d.status}）`;
+    await Promise.all([refreshDocs(), refreshHealth()]);
+  } catch (e) {
+    el.dropzone.textContent = `上传出错：${e.message}`;
+  }
+}
+
+el.dropzone.addEventListener("click", () => el.fileInput.click());
+el.fileInput.addEventListener("change", (e) => {
+  uploadFile(e.target.files[0]);
+  el.fileInput.value = "";
+});
+["dragover", "dragenter"].forEach(ev =>
+  el.dropzone.addEventListener(ev, (e) => { e.preventDefault(); el.dropzone.classList.add("drag"); })
+);
+["dragleave", "drop"].forEach(ev =>
+  el.dropzone.addEventListener(ev, (e) => { e.preventDefault(); el.dropzone.classList.remove("drag"); })
+);
+el.dropzone.addEventListener("drop", (e) => uploadFile(e.dataTransfer.files[0]));
+
+// ---------------------------------------------------------------------------
+// 消息渲染
+// ---------------------------------------------------------------------------
+function appendUserMessage(text) {
+  const div = document.createElement("div");
+  div.className = "msg user";
+  div.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
+  el.messages.appendChild(div);
+  scrollToBottom();
+}
+
+/**
+ * 创建一条 agent 消息，返回可操作的句柄。
+ * 答案区在流式期间用 insertAdjacentText 追加（不重建 DOM），
+ * done 后再一次性替换成渲染后的 HTML。
+ */
+function appendAgentMessage() {
+  const wrap = document.createElement("div");
+  wrap.className = "msg agent";
+  wrap.innerHTML = `
+    <div class="bubble cursor"></div>
+    <div class="msg-meta"></div>
+    <div class="citations"></div>
+  `;
+  el.messages.appendChild(wrap);
+  scrollToBottom();
+
+  const bubble = wrap.querySelector(".bubble");
+  const meta = wrap.querySelector(".msg-meta");
+  const cites = wrap.querySelector(".citations");
+  let raw = "";
+
+  return {
+    appendToken(text) {
+      raw += text;
+      bubble.insertAdjacentText("beforeend", text);
+      scrollToBottom();
+    },
+    setCitations(list) { renderCitations(cites, list); },
+    finish(payload) {
+      bubble.classList.remove("cursor");
+      if (raw) bubble.innerHTML = miniMarkdown(raw);
+      const bits = [
+        payload.stop_reason,
+        `${payload.steps} 步`,
+        `${payload.tokens} tokens`,
+        `${payload.latency_ms} ms`,
+      ];
+      if (payload.ticket_id) bits.push(`工单 ${payload.ticket_id}`);
+      meta.textContent = bits.join(" · ");
+      if (payload.citations?.length) renderCitations(cites, payload.citations);
+      scrollToBottom();
+    },
+    fail(msg) {
+      bubble.classList.remove("cursor");
+      bubble.innerHTML = `<div class="err">${escapeHtml(msg)}</div>`;
+      // 失败也要填 meta：否则界面上“正常结束”和“中途出错”长得一样，
+      // 自动化测试也没法区分这两种结果。
+      meta.textContent = "请求未完成";
+    },
+  };
+}
+
+/** 引用是「整体替换」语义：每次收到 citation 事件就重画整个列表。 */
+function renderCitations(container, list) {
+  container.innerHTML = list.map(c => `
+    <div class="citation">
+      <div class="head">
+        <span class="idx">[${c.index}]</span>
+        <span>${escapeHtml(c.doc_name)} · p.${c.page_no ?? "?"}</span>
+        <span>${escapeHtml(c.section_title || "")}</span>
+      </div>
+      <div class="snippet">${escapeHtml(c.snippet || "")}</div>
+    </div>
+  `).join("");
+}
+
+function appendTrace(name, args) {
+  // 第一次加 trace 时清掉「还没有工具调用」占位
+  const placeholder = el.traceList.querySelector(".empty");
+  if (placeholder) placeholder.remove();
+
+  const div = document.createElement("div");
+  div.className = "trace-step";
+  div.innerHTML =
+    `<span class="tool">${escapeHtml(name)}</span>(${escapeHtml(JSON.stringify(args))})`;
+  el.traceList.appendChild(div);
+}
+
+function renderSession() {
+  if (!state.sessionId) {
+    el.sessionInfo.textContent = "还没有会话。问第一句时会自动创建。";
+    return;
+  }
+  el.sessionInfo.innerHTML = `session_id<br><code>${escapeHtml(state.sessionId)}</code>`;
+}
+
+// ---------------------------------------------------------------------------
+// SSE 解析（fetch + ReadableStream，不用 EventSource）
+// ---------------------------------------------------------------------------
+/**
+ * 为什么不用 EventSource：它只能 GET，问题文本得塞进 URL ——
+ * 有长度限制（nginx 默认 8KB 请求行），而且会落进访问日志。
+ *
+ * 手工解析要处理两件事：
+ *   1. decoder.decode(value, {stream: true}) —— 一个中文字可能被切成两个字节块
+ *   2. buf 里要留最后一段不完整的 —— 网络分片不保证按 \n\n 边界到达
+ */
+async function askStream(question) {
+  const agent = appendAgentMessage();
+  state.controller = new AbortController();
+
+  try {
+    const resp = await fetch("/qa/ask/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        session_id: state.sessionId,     // 第一轮是 null，服务端会生成
+      }),
+      signal: state.controller.signal,
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      // stream: true 表示"后面还有"，让解码器保留不完整的多字节字符
+      buf += decoder.decode(value, { stream: true });
+
+      // 一个事件以空行结尾；最后一段可能不完整，留在 buf 里等下一块
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) >= 0) {
+        const rawEvent = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        dispatch(rawEvent, agent);
+      }
+    }
+
+    agent.finish({ stop_reason: "stream_closed", steps: 0, tokens: 0, latency_ms: 0 });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      // 用户点了「停止」。服务端会收到 CancelledError 并照常收口，
+      // 前端这边只是不再读了。
+      agent.fail("已停止（服务端仍会记录这次对话）");
+    } else {
+      agent.fail(`请求失败：${e.message}`);
+    }
+  } finally {
+    state.controller = null;
+    setStreaming(false);
+  }
+}
+
+function dispatch(rawEvent, agent) {
+  let type = "message";
+  const dataLines = [];
+
+  for (const line of rawEvent.split("\n")) {
+    if (line.startsWith("event:")) type = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+  }
+
+  if (!dataLines.length) return;
+  let payload;
+  try {
+    payload = JSON.parse(dataLines.join("\n"));
+  } catch {
+    return;   // 半截 JSON，丢掉等下一块——正常情况下不会走到这
+  }
+
+  // 四类事件分别对应界面上的四个区域
+  switch (type) {
+    case "token":
+      agent.appendToken(payload.text || "");
+      break;
+    case "tool_call":
+      appendTrace(payload.name, payload.arguments);
+      break;
+    case "citation":
+      agent.setCitations(payload.citations || []);
+      break;
+    case "done":
+      // 会话 ID 只在 done 里出现，第一轮拿到后存下来，后续请求带上
+      if (payload.session_id) {
+        state.sessionId = payload.session_id;
+        renderSession();
+      }
+      agent.finish(payload);
+      break;
+    case "error":
+      agent.fail(payload.detail || "服务端错误");
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 交互
+// ---------------------------------------------------------------------------
+function submit() {
+  const q = el.question.value.trim();
+  if (!q || state.streaming) return;
+
+  const empty = el.messages.querySelector(".empty");
+  if (empty) empty.remove();
+
+  appendUserMessage(q);
+  el.question.value = "";
+  el.question.style.height = "auto";
+  setStreaming(true);
+  askStream(q);
+}
+
+el.send.addEventListener("click", submit);
+el.stop.addEventListener("click", () => {
+  state.controller?.abort();
+});
+
+el.question.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    submit();
+  }
+});
+el.question.addEventListener("input", () => {
+  el.question.style.height = "auto";
+  el.question.style.height = Math.min(el.question.scrollHeight, 120) + "px";
+});
+
+// ---------------------------------------------------------------------------
+// 启动
+// ---------------------------------------------------------------------------
+refreshHealth();
+refreshDocs();
+renderSession();
+setInterval(refreshHealth, 15000);
+</script>
+</body>
+</html>

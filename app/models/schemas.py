@@ -107,11 +107,17 @@ class TicketListResponse(BaseModel):
 class HealthResponse(BaseModel):
     """**永远返回 200**，依赖状态放在 body 里。
 
-    为什么不用 503：编排系统用状态码决定"要不要摘掉这个实例"。
-    健康检查的语义是"进程还活着"，依赖临时不可用不等于进程该死。
+    为什么不用 503：编排系统用状态码决定“要不要摘掉这个实例”。
+    健康检查的语义是“进程还活着”，依赖临时不可用不等于进程该死。
     返回 503 会让 K8s 杀掉所有副本，反而扩大故障。
+
+    status 取值：
+      ok        一切正常
+      degraded  进程活着，但向量库不可用（启动时没连上）
     """
     status: str
     chunks: int
     tickets: int
     sessions: int
+    # degraded 时带上原因，前端直接展示，省得用户猜
+    detail: str = ""
