@@ -112,6 +112,30 @@ async def main() -> None:
         say("")
         await page.screenshot(path=str(SHOTS / "02-first-answer.png"), full_page=True)
 
+        # ---------------- 引用双向定位 ----------------
+        say("## 二·五、引用双向定位")
+        say("")
+        jump_ok = False
+        back_ok = False
+        if cites:
+            try:
+                idx = await page.get_attribute(".citation", "data-cite")
+                await page.click(".citation")
+                await page.wait_for_timeout(400)
+                jump_ok = await page.query_selector(".cite-ref.flash") is not None
+
+                await page.click(f'.cite-ref[data-cite="{idx}"]')
+                await page.wait_for_timeout(400)
+                back_ok = await page.query_selector(".citation.flash") is not None
+            except Exception as exc:      # noqa: BLE001
+                say(f"- 点击异常：{type(exc).__name__}: {exc}")
+        else:
+            say("- 没有引用可点（可能检索失败）")
+        say(f"- 点引用卡片 → 答案里的 [n] 高亮：{'✅' if jump_ok else '❌'}")
+        say(f"- 点答案里的 [n] → 引用卡片高亮：{'✅' if back_ok else '❌'}")
+        say("")
+        await page.screenshot(path=str(SHOTS / "05-citation-jump.png"), full_page=True)
+
         # ---------------- 第二轮 ----------------
         say("## 三、第二轮：会话记忆")
         say("")
@@ -169,6 +193,7 @@ async def main() -> None:
         say("|---|---|")
         say("| `01-home.png` | 初始页面 |")
         say("| `02-first-answer.png` | 第一轮完整答案 + 引用 + trace |")
+        say("| `05-citation-jump.png` | 点击引用后的定位高亮 |")
         say("| `03-second-answer.png` | 第二轮（多轮记忆） |")
         say("| `04-after-stop.png` | 点停止之后 |")
         say("")

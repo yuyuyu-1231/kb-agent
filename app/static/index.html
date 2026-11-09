@@ -166,7 +166,13 @@
     border-radius: 6px;
     padding: 8px 10px;
     font-size: 12px;
+    cursor: pointer;
+    transition: background .2s, border-color .2s;
   }
+  .citation:hover { border-color: var(--primary); }
+  /* 双向定位的高亮：答案里的 [n] 和引用卡片都闪一下 */
+  .flash { background: #fef08a !important; transition: background .2s; }
+  .cite-ref { cursor: pointer; color: var(--primary); font-weight: 600; }
   .citation .head {
     display: flex;
     gap: 8px;
@@ -360,6 +366,10 @@ function escapeHtml(s) {
  *  先 escape 再替换，顺序反了会有 XSS。 */
 function miniMarkdown(text) {
   let html = escapeHtml(text);
+  // 把 [n] 变成可点击的锚点，点击后跳到对应引用卡片。
+  // 必须在 escapeHtml 之后——escapeHtml 不会动方括号，顺序无关但统一放前面。
+  html = html.replace(/\[(\d{1,3})\]/g,
+    '<span class="cite-ref" data-cite="$1">[$1]</span>');
   html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   // 连续的 "- xxx" 行包成 <ul>
   html = html.replace(/(?:^|\n)((?:[-*] .+\n?)+)/g, (m, block) => {
@@ -369,6 +379,24 @@ function miniMarkdown(text) {
   });
   html = html.replace(/\n/g, "<br>");
   return html;
+}
+
+/** 点击引用卡片 → 滚动到答案里对应的 [n] 并高亮。 */
+function jumpToRef(index) {
+  const ref = document.querySelector(`.cite-ref[data-cite="${index}"]`);
+  if (!ref) return;
+  ref.scrollIntoView({ behavior: "smooth", block: "center" });
+  ref.classList.add("flash");
+  setTimeout(() => ref.classList.remove("flash"), 1200);
+}
+
+/** 点击答案里的 [n] → 滚动到对应引用卡片并高亮。 */
+function jumpToCitation(index) {
+  const card = document.querySelector(`.citation[data-cite="${index}"]`);
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.add("flash");
+  setTimeout(() => card.classList.remove("flash"), 1200);
 }
 
 function scrollToBottom() {
@@ -504,7 +532,13 @@ function appendAgentMessage() {
     setCitations(list) { renderCitations(cites, list); },
     finish(payload) {
       bubble.classList.remove("cursor");
-      if (raw) bubble.innerHTML = miniMarkdown(raw);
+      if (raw) {
+        bubble.innerHTML = miniMarkdown(raw);
+        // 答案重新渲染过，锚点监听要重新绑
+        bubble.querySelectorAll(".cite-ref").forEach(node => {
+          node.addEventListener("click", () => jumpToCitation(node.dataset.cite));
+        });
+      }
       const bits = [
         payload.stop_reason,
         `${payload.steps} 步`,
@@ -526,10 +560,11 @@ function appendAgentMessage() {
   };
 }
 
-/** 引用是「整体替换」语义：每次收到 citation 事件就重画整个列表。 */
+/** 引用是「整体替换」语义：每次收到 citation 事件就重画整个列表。
+ *  重画后要重新绑点击——innerHTML 会把监听器一起清掉。 */
 function renderCitations(container, list) {
   container.innerHTML = list.map(c => `
-    <div class="citation">
+    <div class="citation" data-cite="${c.index}" title="点击定位到答案中的 [${c.index}]">
       <div class="head">
         <span class="idx">[${c.index}]</span>
         <span>${escapeHtml(c.doc_name)} · p.${c.page_no ?? "?"}</span>
@@ -538,6 +573,10 @@ function renderCitations(container, list) {
       <div class="snippet">${escapeHtml(c.snippet || "")}</div>
     </div>
   `).join("");
+
+  container.querySelectorAll(".citation").forEach(card => {
+    card.addEventListener("click", () => jumpToRef(card.dataset.cite));
+  });
 }
 
 function appendTrace(name, args) {
@@ -574,6 +613,9 @@ function renderSession() {
 async function askStream(question) {
   const agent = appendAgentMessage();
   state.controller = new AbortController();
+  // 标记是否已经收到 done。没收到才用兜底 finish ——
+  // 否则兜底会盖掉真实数据（实测踩过：页面显示 “0 步 · 0 tokens”）。
+  let finished = false;
 
   try {
     const resp = await fetch("/qa/ask/stream", {
@@ -607,11 +649,18 @@ async function askStream(question) {
       while ((sep = buf.indexOf("\n\n")) >= 0) {
         const rawEvent = buf.slice(0, sep);
         buf = buf.slice(sep + 2);
-        dispatch(rawEvent, agent);
+        if (dispatch(rawEvent, agent)) finished = true;
       }
     }
 
-    agent.finish({ stop_reason: "stream_closed", steps: 0, tokens: 0, latency_ms: 0 });
+    // 流正常结束但没收到 done（比如服务端提前关了连接）：补一个。
+    // 收到过 done 就不动 —— 真实字段比这里的占位值有用得多。
+    if (!finished) {
+      agent.finish({
+        stop_reason: "stream_closed",
+        steps: 0, tokens: 0, latency_ms: 0,
+      });
+    }
   } catch (e) {
     if (e.name === "AbortError") {
       // 用户点了「停止」。服务端会收到 CancelledError 并照常收口，
@@ -635,12 +684,12 @@ function dispatch(rawEvent, agent) {
     else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
   }
 
-  if (!dataLines.length) return;
+  if (!dataLines.length) return false;
   let payload;
   try {
     payload = JSON.parse(dataLines.join("\n"));
   } catch {
-    return;   // 半截 JSON，丢掉等下一块——正常情况下不会走到这
+    return false;   // 半截 JSON，丢掉等下一块——正常情况下不会走到这
   }
 
   // 四类事件分别对应界面上的四个区域
@@ -661,11 +710,12 @@ function dispatch(rawEvent, agent) {
         renderSession();
       }
       agent.finish(payload);
-      break;
+      return true;
     case "error":
       agent.fail(payload.detail || "服务端错误");
       break;
   }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
