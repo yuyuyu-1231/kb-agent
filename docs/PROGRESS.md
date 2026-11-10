@@ -474,6 +474,40 @@ docker start kb-qdrant
 **内存不够时**：先停 Python 服务（BGE 占几百 MB）再起 Docker，
 反过来内存会不够。
 
+### 真实 HTTP 断连补验（11/10）
+
+单元测试用 `gen.aclose()` 验过中断标记，但那是 `GeneratorExit`。
+真实浏览器断连走 `CancelledError`。两者共用同一个 except 分支，
+但**推理不等于证据**，所以用 Playwright 跑了一遍真实断连。
+
+**四项全过：**
+
+| 检查项 | 结果 |
+|---|---|
+| trace 的 stop_reason | ✅ `cancelled` |
+| 记忆带中断标记 | ✅ |
+| 第二轮答对题（问住宿 → 答住宿） | ✅ |
+| **第二轮没接着半截内容写** | ✅ 开头无“继续/接着/刚才” |
+
+**记忆里的实际内容**：
+
+```
+user:      试用期员工能休年假吗？
+assistant: I'll search the knowledge base for relevant policies.
+
+[本轮回答因连接中断而未完成，以上内容不完整]
+```
+
+**一个新发现**：断在**工具调用阶段**时，`partial_text` 累积的是
+模型的“旁白”（“I'll search…”），不是最终答案。
+
+这比断在正文中间更有信息量——下一轮模型能看出
+“上一轮刚开始检索就断了”。
+
+**测试脚本的一个坑**：停止后前端拿不到 `session_id`——
+它只在 `done` 事件里返回，而结果是“答到一半就停”，`done` 永远不会到。
+所以脚本改成从 SQLite 直接查最新 session（记忆不依赖 Qdrant，降级时也能验）。
+
 ---
 
 ## 下一步
