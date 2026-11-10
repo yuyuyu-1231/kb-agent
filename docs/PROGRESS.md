@@ -254,6 +254,7 @@ API 层刚起步（骨架 + `/health` 已跑通），还剩 4 个路由 + 前端
 | 4 | 评估只跑了一轮 | 无法估计稳定性 | 可选：3 次取多数 |
 | 5 | R02（股权激励）仍编造“期权” | 幻觉 2 条之一 | 第 4 周优化项 |
 | 6 | 变体集只有 6 类 | 语音转写 / 繁体 / 大小写未覆盖 | 暂不做 |
+| 7 | 跨会话记忆未实现（只有 `session_id`，无 `user_id`） | 换个会话就失忆；“长期记忆”面试只能答没做 | 见下节“长期记忆” |
 
 ## 验证缺口（实现了但没证过）
 
@@ -336,12 +337,50 @@ API 层刚起步（骨架 + `/health` 已跑通），还剩 4 个路由 + 前端
 
 只有 `session_id`，没有 `user_id`。SPEC 提过跨会话记忆的 key 设计（C3），未实现。
 
-最小方案：
+#### 业界参考：Anthropic 的 Agent Memory 四层（2026-11-06）
 
-```
-user_memory 表：user_id, kind, content, updated_at
-两个工具：remember_note(user_id, content) / recall_notes(user_id)
-```
+来源：`The components of agent memory`，Anthropic Engineering，2026-11-06（Lance Martin）
+<https://www.anthropic.com/research/components-of-agent-memory>
+
+它把“记忆”的边界划得很窄：**只算跨会话保留的知识**；改权重、单次会话内的
+上下文学习、把旧轮次压成摘要（compaction）**都不算**。
+
+| 层 | 存什么 | 特点 |
+|---|---|---|
+| Transcripts 原始记录 | 完整对话、工具调用、执行结果 | **唯一的事实源**，其余层都是它的缓存 |
+| Memory Notes 笔记 | Claude 自己写的经验、错误原因、规则 | 会话中随手写，**写的时候就可能写错** |
+| Memory Representations 表征 | Wiki、索引、交叉链接 | 从日志和笔记算出来的结构化知识 |
+| Injected Context 注入上下文 | 少量高价值索引 | 每次会话开头加载，**必须很短**（Claude Code：`MEMORY.md` 前 200 行 / 25KB） |
+
+**Dreaming（做梦）**：会话之间的离线流程 —— 回头翻 transcripts，按“上层对下层对账”
+的原则改错笔记、合并重复、搭 wiki、把最要紧的提到注入层。
+一句话原则：**原始日志是事实，其余都是缓存，缓存要定期对账。**
+
+反直觉的实测结论：写 **413 份**笔记的模型在宝可梦任务上只拿 1 枚徽章，
+写 **9 份**的拿 4 枚 —— 记忆的关键不是存多少，是筛得准不准、能不能纠错。
+
+**这条数据的可信度**：Anthropic 自测，宝可梦每模型只跑一次，wiki 实验仅 24–25 题，
+无第三方复现。另外网传“87% vs 73% 是 dreaming 带来的提升”是错的，那组数字
+是部分并购题上“wiki 检索 vs 纯搜索”的对比。
+
+#### 本项目现状：四层一层都没有
+
+| Anthropic 的层 | 本项目 | 说明 |
+|---|---|---|
+| Transcripts | ⚠️ 部分 | `data/traces/*.jsonl` 有完整记录，但设计用途是调试回放，不是记忆的取证源 |
+| Memory Notes | ❌ | 无 |
+| Representations | ❌ | 无，且原文自测显示单文档场景无明显收益 |
+| Injected Context | ❌ | 无，新会话不带任何历史 |
+
+**所以：任何文档/简历里都不能写“参考 Anthropic 记忆架构实现了 X”。**
+本节的用途是记录业界参照系与差距，不代表实现。
+
+#### 如果要做的顺序（按收益排序）
+
+1. 先让 transcripts 可检索（把已有 trace 变成搜索入口），成本最低
+2. 再加 `memory_notes`：会话结束时一次 LLM 调用抽 0–3 条，带 `source_trace_id` 可回溯
+3. 注入：新会话按重要性取 top 3–5 拼进 system prompt
+4. 最后才考虑结构化表征（wiki）—— 原文数据不支持单文档场景做这一层
 
 **优先级低于“把已有的东西证过”** —— 先证明现有能力真的能用。
 
