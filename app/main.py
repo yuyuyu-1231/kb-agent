@@ -27,6 +27,8 @@ lifespan 只在真正 `uvicorn` 启动时执行，测试里可以完全不触发
 
 from __future__ import annotations
 
+import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -53,6 +55,59 @@ from harness.tools import ToolRegistry
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+async def _auto_ingest(settings, embedder, store) -> None:
+    """collection 为空时，把 data/corpus 下的 PDF 全部入库。
+
+    为什么需要：docker compose 新建的 Qdrant volume 是空的。
+    没有这一步，容器起来了但知识库 0 个 chunk，所有问答都会降级。
+
+    幂等性：先查 count()，>0 就直接返回。
+    所以重启容器不会重复入库。
+
+    用环境变量控制：本地开发时不想要这个行为（习惯手动跑脚本）。
+    """
+    if os.getenv("AUTO_INGEST", "").lower() not in ("1", "true", "yes"):
+        return
+
+    try:
+        if await store.count() > 0:
+            return
+    except Exception as exc:  # noqa: BLE001
+        print(f"[AUTO_INGEST] 查 count 失败，跳过：{type(exc).__name__}")
+        return
+
+    corpus = Path(settings.data_dir) / "corpus"
+    pdfs = sorted(corpus.glob("*.pdf"))
+    if not pdfs:
+        print(f"[AUTO_INGEST] {corpus} 下没有 PDF，跳过")
+        return
+
+    from app.services.ingest import parse_pdf
+
+    for pdf in pdfs:
+        try:
+            chunks, _ = await asyncio.to_thread(
+                parse_pdf,
+                pdf,
+                chunk_size=settings.chunk_size,
+                overlap=settings.chunk_overlap,
+            )
+            if not chunks:
+                print(f"[AUTO_INGEST] {pdf.name}: 没提取到文本，跳过")
+                continue
+            vectors = await embedder.embed_passages([c["text"] for c in chunks])
+            await store.delete_document(pdf.stem)
+            await store.upsert_chunks(
+                doc_id=pdf.stem,
+                doc_name=pdf.name,
+                chunks=chunks,
+                vectors=vectors,
+            )
+            print(f"[AUTO_INGEST] {pdf.name}: {len(chunks)} chunks")
+        except Exception as exc:  # noqa: BLE001 - 单个文档失败不该阻塞启动
+            print(f"[AUTO_INGEST] {pdf.name} 失败：{type(exc).__name__}: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动时建单例，关闭时清理。"""
@@ -77,6 +132,10 @@ async def lifespan(app: FastAPI):
         store_ready = False
         store_error = f"{type(exc).__name__}: {exc}"
         print(f"[WARN] Qdrant 不可用，降级启动：{store_error}")
+
+    # 容器首次启动时 Qdrant 是空的，自动把 corpus 里的 PDF 入进去
+    if store_ready:
+        await _auto_ingest(settings, embedder, vector_store)
 
     retriever = Retriever.from_infra(embedder, vector_store)
     tickets = TicketStore(settings.sqlite_path)

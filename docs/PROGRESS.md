@@ -510,6 +510,82 @@ assistant: I'll search the knowledge base for relevant policies.
 
 ---
 
+## 部署（11/10，部分验证）
+
+### 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `Dockerfile` | 应用镜像：非 root、模型预热、healthcheck |
+| `.dockerignore` | 排除 `.venv` / `.env` / `data` / `docs` |
+| `docker-compose.yml` | app + qdrant，named volume 持久化 |
+| `app/main.py::_auto_ingest` | 首次启动自动入库 |
+
+### 已验证
+
+| 项 | 结果 |
+|---|---|
+| compose 创建 named volume | ✅ `kb-agent-qdrant-storage` |
+| Qdrant 容器 healthy | ✅ `Up (healthy)` |
+| **自动入库** | ✅ `[AUTO_INGEST] 员工手册.pdf: 14 chunks` |
+| 完整镜像构建 | ❌ Docker 中途退出 |
+| 服务持续健康 | ❌ 同上 |
+
+### 为什么没跑完：环境，不是配置
+
+Docker Desktop 的 WSL 后端在这台机器上反复退出：
+
+```
+16 GB 内存，PyCharm 占 2.4 GB，还有一个 neo4j-db 容器在跑
+Docker 构建镜像（pip install + 模型下载）要吃 2-3 GB
+→ docker-desktop 发行版变成 Stopped
+```
+
+**小负载（只起 Qdrant）能撑住，大负载（构建镜像）撑不住。**
+
+### 换台机器怎么验（三步）
+
+```bash
+docker compose up -d --build        # 首次约 5-10 分钟
+docker compose logs -f app          # 应该看到 [AUTO_INGEST] ... 14 chunks
+curl http://localhost:8000/health   # 期望 {"status":"ok","chunks":14,...}
+```
+
+浏览器打开 `http://localhost:8000/` 即可。
+
+### 本机绕过办法（已实测可行）
+
+```bash
+# 只起 Qdrant（几百 MB，能撑住）
+docker compose up -d qdrant
+
+# 应用用本地 venv 跑（Linux/macOS）
+AUTO_INGEST=true python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+**Windows PowerShell**：
+
+```powershell
+docker compose up -d qdrant
+$env:AUTO_INGEST="true"
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+**本机实测这条路能跑通自动入库**（见上表）。
+
+### 关键配置点（以后改的时候不要踩回去）
+
+| 点 | 不做会怎样 |
+|---|---|
+| `QDRANT_URL` 用服务名 `qdrant` | 容器里的 localhost 指自己，连不上 |
+| `libgl1` / `libglib2.0-0` | PyMuPDF 报 `ImportError: libGL.so.1`，表现像“本地能跑容器不行” |
+| 构建期预热模型 | 首个用户等 20-30 秒下载 |
+| `HF_ENDPOINT` 镜像站 | 构建时 huggingface.co 拉不动 |
+| `.env` 走 `env_file` | API key 会被烤进镜像层 |
+| `.dockerignore` 排除 `.venv` | 构建上下文多几百 MB，慢十倍 |
+
+---
+
 ## 下一步
 
 **后端全部完成（11/8）。只剩前端。**

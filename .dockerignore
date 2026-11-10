@@ -1,0 +1,40 @@
+# 哪些东西不该进构建上下文
+#
+# 不加这个文件，`docker build .` 会把整个目录（含 .venv 的几百 MB）
+# 打包发给 daemon，构建慢十倍，镜像也可能意外带进敏感文件。
+
+# 虚拟环境 —— 镜像里会重新装
+.venv/
+venv/
+env/
+
+# 版本控制
+.git/
+.gitignore
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 运行时数据 —— 由 volume 挂载，不进镜像
+data/
+!data/corpus/bundled_placeholder.txt
+
+# 本地配置与凭据 —— 绝对不能进镜像
+.env
+*.local
+
+# 文档与截图 —— 镜像里用不到
+docs/
+*.md
+!README.md
+
+# 测试与临时产物
+tests/
+scripts/test_*.py
+scripts/trace_*.py
+scripts/make_sample_pdf.py
+.coverage
+htmlcov/
