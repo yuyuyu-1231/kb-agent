@@ -510,50 +510,111 @@ assistant: I'll search the knowledge base for relevant policies.
 
 ---
 
-## 部署（11/10，部分验证）
+## 部署（已完成 11/10）
 
 ### 交付物
 
 | 文件 | 作用 |
 |---|---|
-| `Dockerfile` | 应用镜像：非 root、模型预热、healthcheck |
+| `Dockerfile` | 应用镜像：非 root、apt/pip/HF 全走国内源、模型预热、healthcheck |
 | `.dockerignore` | 排除 `.venv` / `.env` / `data` / `docs` |
 | `docker-compose.yml` | app + qdrant，named volume 持久化 |
-| `app/main.py::_auto_ingest` | 首次启动自动入库 |
+| `app/main.py::_auto_ingest` | 首次启动自动入库（幂等） |
 
-### 已验证
+### 验收结果（清空 volume 后从头跑一遍）
 
-| 项 | 结果 |
+| 检查项 | 结果 |
 |---|---|
-| compose 创建 named volume | ✅ `kb-agent-qdrant-storage` |
-| Qdrant 容器 healthy | ✅ `Up (healthy)` |
-| **自动入库** | ✅ `[AUTO_INGEST] 员工手册.pdf: 14 chunks` |
-| 完整镜像构建 | ❌ Docker 中途退出 |
-| 服务持续健康 | ❌ 同上 |
+| 镜像构建 | ✅ `kb-agent-app:latest` 1.59GB |
+| `kb-qdrant` | ✅ `Up (healthy)` |
+| `kb-agent` | ✅ `Up (healthy)` |
+| 自动入库 | ✅ `[AUTO_INGEST] 员工手册.pdf: 14 chunks` |
+| `/health` | ✅ `{"status":"ok","chunks":14,...}` |
+| 启动耗时 | ✅ 约 10 秒，日志里没有 `Fetching`（模型来自镜像内缓存） |
 
-### 为什么没跑完：环境，不是配置
-
-Docker Desktop 的 WSL 后端在这台机器上反复退出：
-
-```
-16 GB 内存，PyCharm 占 2.4 GB，还有一个 neo4j-db 容器在跑
-Docker 构建镜像（pip install + 模型下载）要吃 2-3 GB
-→ docker-desktop 发行版变成 Stopped
-```
-
-**小负载（只起 Qdrant）能撑住，大负载（构建镜像）撑不住。**
-
-### 换台机器怎么验（三步）
+复现命令：
 
 ```bash
-docker compose up -d --build        # 首次约 5-10 分钟
-docker compose logs -f app          # 应该看到 [AUTO_INGEST] ... 14 chunks
-curl http://localhost:8000/health   # 期望 {"status":"ok","chunks":14,...}
+docker compose down -v      # 清空 Qdrant volume，让 AUTO_INGEST 真的跑一遍
+docker compose up -d --build
+docker compose logs app | grep AUTO_INGEST
+curl http://localhost:8000/health
 ```
 
-浏览器打开 `http://localhost:8000/` 即可。
+### 跑通之前踩的三个坑
 
-### 本机绕过办法（已实测可行）
+三条都不是「配置写错」，而是**只有真的在容器里跑才会暴露**的问题：
+
+#### 坑 1：apt 连不上 deb.debian.org，构建卡满 5 分钟后 exit 100
+
+同一台机器、同一时刻在容器里实测三个源：
+
+| 源 | 结果 |
+|---|---|
+| `deb.debian.org` | 200，但单请求 **16.6 秒**，Packages 索引直接超时 |
+| `mirrors.tuna.tsinghua.edu.cn` | **403 Forbidden**（0.4 秒返回） |
+| `mirrors.aliyun.com` | **200，0.11 秒** |
+
+修法：构建前换阿里云源。注意 Debian 12+ 把源写在
+`/etc/apt/sources.list.d/debian.sources`，老版本是 `/etc/apt/sources.list`，两处都要兜：
+
+```dockerfile
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+        [ -f "$f" ] && sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g' "$f"; \
+    done; \
+    apt-get update && apt-get install ...
+```
+
+#### 坑 2：hf-mirror 不支持 Xet，下载会「静默卡住」
+
+新版 `huggingface_hub` 默认走 Xet 传输协议，`hf-mirror.com` 不支持。
+失败方式极其坑人：**不报错、不超时、进度条停在 `3/5` 十分钟不动**。
+
+修法：`HF_HUB_DISABLE_XET=1` 退回普通 HTTP。慢（实测 ~90KB/s，95MB 要 17 分钟），
+但能跑完，而且只跑一次——烤进镜像层后重建不再下载。
+
+#### 坑 3：模型烤进镜像了，运行期却当成空缓存重下 95MB（最隐蔽）
+
+两个原因叠加，缺一不可：
+
+**① `Embedder.from_settings` 硬编码了 Windows 缓存路径**
+
+```python
+# 改之前
+cache_dir=Path(r"E:\DevCaches\fastembed"),
+```
+
+在 Linux 里这**不是一个路径**，而是一个带反斜杠的普通目录名，
+相对 `/app` 解析成 `/app/E:\DevCaches\fastembed` —— 永远不存在。
+fastembed 于是每次都判定「没有缓存」，重新下载 95MB，
+`/health` 卡在启动期二十多分钟。
+
+```python
+# 改之后：容器读环境变量，本地开发仍走 E 盘
+cache_dir=Path(os.getenv("FASTEMBED_CACHE_PATH") or r"E:\DevCaches\fastembed"),
+```
+
+**② fastembed 默认缓存目录的属主不对**
+
+fastembed 默认缓存到 `tempfile.gettempdir()/fastembed_cache`。构建期是 root，
+运行期是 appuser —— 缓存目录不可写，实测 `touch` 直接 Permission denied，
+拿不到锁文件同样判定缓存无效。
+
+修法（Dockerfile，接在模型预热之后）：
+
+```dockerfile
+RUN mv /tmp/fastembed_cache /models/fastembed_cache
+ENV FASTEMBED_CACHE_PATH=/models/fastembed_cache
+```
+
+`mv` 是同层内重命名，不产生第二份；`/models` 本来就在
+`chown -R appuser:appuser /app /models` 里，属主一并解决。
+
+**为什么 `ENV` 放在预热之后**：Docker 的层缓存从第一处改动往后全部失效。
+放进顶部那个 `ENV` 块，预热层立刻作废，又得重下 95MB。放在预热之后，
+预热层能命中缓存（实测重建只花几十秒）。
+
+### 本机开发怎么跑（不起容器）
 
 ```bash
 # 只起 Qdrant（几百 MB，能撑住）
@@ -571,7 +632,8 @@ $env:AUTO_INGEST="true"
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-**本机实测这条路能跑通自动入库**（见上表）。
+**这是本地开发/调试的快捷方式**，用来快速改代码；验收一律以容器为准（容器里才有
+非 root、挂载、服务名解析这些差异 —— 坑 3 就是只在容器里才暴露）。
 
 ### 关键配置点（以后改的时候不要踩回去）
 
@@ -583,20 +645,22 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `HF_ENDPOINT` 镜像站 | 构建时 huggingface.co 拉不动 |
 | `.env` 走 `env_file` | API key 会被烤进镜像层 |
 | `.dockerignore` 排除 `.venv` | 构建上下文多几百 MB，慢十倍 |
+| apt 换阿里云源 | deb.debian.org 单请求 16.6s，Packages 超时，构建 exit 100 |
+| `HF_HUB_DISABLE_XET=1` | hf-mirror 不支持 Xet，进度条停在 3/5，不报错也不前进 |
+| `FASTEMBED_CACHE_PATH` + 缓存搬 `/models` | 每次启动重下 95MB，`/health` 卡启动期二十多分钟 |
 
 ---
 
 ## 下一步
 
-**后端全部完成（11/8）。只剩前端。**
+**后端、前端、本机构建镜像全部完成（11/10）。**
 
 | 顺序 | 任务 | 说明 |
 |---|---|---|
-| 1 | **前端**（第 5 轮） | 约束 C9/C10 |
-| 2 | 部署 | Dockerfile + 公网地址，让面试官能点开 |
-| 3 | 评估集扩样（建议） | 50 条方差太大，A/B 结论不可靠 |
+| 1 | 部署到公网 | 本机已验证，还差一台服务器 + 公网地址，让面试官能点开 |
+| 2 | 评估集扩样（建议） | 50 条方差太大，A/B 结论不可靠 |
 
-### 明天开工第一件事：`app/static/index.html`
+### 前端 SSE 解析要点（已完成，留作参考）
 
 四个区块（约束 C9/C10）：
 
