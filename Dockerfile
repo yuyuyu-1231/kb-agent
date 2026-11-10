@@ -20,19 +20,29 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # ---- 系统依赖 ----
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 构建机在国内：deb.debian.org 直连极慢（单请求就要十几秒，Packages 索引直接超时），
+# apt 重试十几分钟后整层构建失败。换阿里云源，和下面 pip 走腾讯源、HF 走镜像站同理。
+# 实测 2026-11-10：阿里云 0.1s / 清华 403 / deb.debian.org 16.6s。
+# Debian 12+ 把源写在 sources.list.d/debian.sources 里，老版本是 sources.list，两处都兜一下。
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+        [ -f "$f" ] && sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g' "$f"; \
+    done; \
+    apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- 环境变量 ----
+# HF_HUB_DISABLE_XET=1：huggingface_hub 新版默认走 Xet 传输，hf-mirror 不支持，
+# 实测会停在 3/5 超过 10 分钟不报错也不前进。禁掉后走普通 HTTP，速度慢但能跑完。
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple \
     HF_HOME=/models \
     HF_ENDPOINT=https://hf-mirror.com \
+    HF_HUB_DISABLE_XET=1 \
     # 容器里必须监听 0.0.0.0，否则宿主机访问不到
     PYTHONPATH=/app
 
@@ -46,6 +56,14 @@ RUN python -c "\
 from fastembed import TextEmbedding; \
 TextEmbedding(model_name='BAAI/bge-small-zh-v1.5'); \
 print('embedding model cached')"
+
+# fastembed 默认缓存到 tempfile.gettempdir()/fastembed_cache。构建期是 root，
+# 运行期是 appuser —— 缓存目录不可写，拿不到锁就会被判成“缓存无效”重新下 95MB。
+# 实测：容器启动后 /tmp/fastembed_cache 里明明有 model_optimized.onnx，
+# 但 touch 直接 Permission denied，于是 /health 卡在启动阶段十几分钟。
+# 搬到 /models 下并把路径写死，下面那条 chown -R /models 顺便把属主交给 appuser。
+RUN mv /tmp/fastembed_cache /models/fastembed_cache
+ENV FASTEMBED_CACHE_PATH=/models/fastembed_cache
 
 # ---- 代码 ----
 COPY harness/ ./harness/

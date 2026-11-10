@@ -64,8 +64,11 @@ class Embedder:
             model_name=settings.embed_model,
             dim=settings.embed_dim,
             query_instruction=settings.embed_query_instruction,
-            # 显式指定缓存目录，避免落到 C 盘用户目录
-            cache_dir=Path(r"E:\DevCaches\fastembed"),
+            # 缓存目录优先读环境变量：容器里是 /models/fastembed_cache（镜像构建期已预热），
+            # 本地开发沿用 E:\DevCaches\fastembed，避免落到 C 盘用户目录。
+            # 以前这里写死 Windows 路径，容器里该路径根本不存在 ——
+            # 结果每次启动都当空缓存，重下 95MB 模型，/health 卡在启动阶段十几分钟。
+            cache_dir=Path(os.getenv("FASTEMBED_CACHE_PATH") or r"E:\DevCaches\fastembed"),
         )
 
     # ---------------------------------------------------------------- 模型
