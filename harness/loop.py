@@ -273,6 +273,16 @@ DEFAULT_SYSTEM_PROMPT = """你是企业知识库客服助手。
 - 回答简洁，先结论后依据。"""
 
 
+# 被中断的回答写进记忆时追加的标记。
+#
+# 为什么必须加：客户端断连时只存了半截答案（实测断在 2 个字，存的是“我先”）。
+# 下一轮模型看到 `assistant: "我先"` 会以为上一轮还没说完，
+# 可能**接着往下写**，答非所问。
+#
+# 加了标记，模型至少知道“这个话题没答完”，要么重新回答，要么主动确认。
+CANCELLED_MEMORY_NOTE = "\n\n[本轮回答因连接中断而未完成，以上内容不完整]"
+
+
 _DEGRADE_TEXT: dict[StopReason, str] = {
     StopReason.MAX_STEPS: "这个问题需要查证的信息较多，已达到本次处理的最大轮数。建议提交工单由人工跟进。",
     StopReason.BUDGET_EXHAUSTED: "本次查询涉及的内容超出处理预算，已停止。建议把问题拆小后再问。",
@@ -563,13 +573,27 @@ class AgentLoop:
                 StopReason.TICKET_CREATED,
                 StopReason.CANCELLED,
             ):
+                # 中断的半截答案必须打标记再存。
+                #
+                # 不加标记的后果：模型看到 `assistant: "我先"` 会以为
+                # 上一轮还没说完，下一轮可能**接着往下写**（“我先说一下
+                # 年假天数…”），用户问的却是另一件事。
+                #
+                # 为什么不断言“太短就不存”：
+                # - 不存 user → 用户下次说“刚才那个”，模型完全不知道，体验更差
+                # - 只存 user → 部分模型的 messages 校验对连续 user 会报警
+                # 统一打标记，两种语义都能表达清楚。
+                content = answer
+                if stop_reason == StopReason.CANCELLED:
+                    content = answer + CANCELLED_MEMORY_NOTE
+
                 try:
                     # 为什么要 shield：task 被 cancel 后，任务内任何 await
                     # 都会**立即**再抛 CancelledError。不加 shield 的话，
                     # _remember 里的 await to_thread 根本跑不完，记忆依旧丢。
                     # shield 让内部协程在后台继续，外层立即拿到取消信号。
                     await asyncio.shield(
-                        self._remember(session_id, question, answer)
+                        self._remember(session_id, question, content)
                     )
                 except asyncio.CancelledError:
                     # shield 在外层被取消时立即抛 CancelledError，

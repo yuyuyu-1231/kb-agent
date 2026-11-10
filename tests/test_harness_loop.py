@@ -582,3 +582,71 @@ async def test_citation_survives_tool_failure(registry: ToolRegistry) -> None:
     assert result.stop_reason is StopReason.ANSWERED
     assert len(result.citations) == 1
     assert result.citations[0].index == 1
+
+
+# --------------------------------------------------------------------------- #
+# 中断的半截答案写进记忆要带标记
+# --------------------------------------------------------------------------- #
+
+async def test_cancelled_answer_marked_in_memory(tmp_path) -> None:
+    """客户端断连时，半截答案写进记忆必须带“未完成”标记。
+
+    不加标记的后果：模型下一轮看到 `assistant: "我先"`，
+    会以为上一轮还没说完，可能**接着往下写**，而用户问的是另一件事。
+
+    这条测试用 `gen.aclose()` 触发 GeneratorExit 来模拟断连，
+    和真实 HTTP 断连抛的 CancelledError 走同一个 except 分支。
+    """
+    from harness.loop import CANCELLED_MEMORY_NOTE
+
+    registry = ToolRegistry()
+
+    @registry.tool(citation_aware=True)
+    async def search_knowledge(query: str) -> list:
+        """假检索。
+
+        Args:
+            query: 查询词
+        """
+        return [{
+            "text": "假结果", "doc_id": "d1", "doc_name": "x.pdf",
+            "page_no": 1, "chunk_index": 0, "score": 0.5,
+        }]
+
+    llm = FakeLLM(text("我先"))
+    memory = SessionMemory(tmp_path / "s.db")
+    loop = AgentLoop(
+        llm=llm, registry=registry, memory=memory, token_budget=30000,
+    )
+
+    gen = loop.run_stream("试用期能休年假吗", session_id="s-cancel")
+    async for event in gen:
+        if event.type == "token":
+            break                       # 收到第一个 token 就“断开”
+    await gen.aclose()                  # ← 触发 GeneratorExit
+
+    history = memory.load("s-cancel")
+    assert len(history) == 2
+    assert history[0]["role"] == "user"
+    assert history[1]["role"] == "assistant"
+    assert "我先" in history[1]["content"], "半截内容要保留，不能丢"
+    assert CANCELLED_MEMORY_NOTE.strip() in history[1]["content"], \
+        "必须带中断标记，否则下一轮模型会以为答完了"
+
+
+async def test_normal_answer_not_marked(tmp_path) -> None:
+    """正常回答不加标记——标记只在 cancelled 时出现。"""
+    from harness.loop import CANCELLED_MEMORY_NOTE
+
+    registry = ToolRegistry()
+    llm = FakeLLM(text("年假 5 天。"))
+    memory = SessionMemory(tmp_path / "s.db")
+    loop = AgentLoop(
+        llm=llm, registry=registry, memory=memory, token_budget=30000,
+    )
+
+    await loop.run("年假几天", session_id="s-ok")
+
+    history = memory.load("s-ok")
+    assert len(history) == 2
+    assert CANCELLED_MEMORY_NOTE.strip() not in history[1]["content"]
