@@ -76,12 +76,16 @@
   }
 
   #dropzone {
+    /* label 默认是 inline：行内元素的垂直 padding 不撑开行高，
+       虚线框会和上下内容叠在一起。必须显式改成块级。 */
+    display: block;
     border: 2px dashed var(--border);
     border-radius: 8px;
     padding: 20px 12px;
     text-align: center;
     color: var(--muted);
     font-size: 13px;
+    line-height: 1.7;
     cursor: pointer;
     transition: .15s;
   }
@@ -90,7 +94,10 @@
     background: var(--primary-dim);
     color: var(--primary);
   }
-  #dropzone input { display: none; }
+  /* 隐藏原生文件框。
+     注意不能写 `#dropzone input`：input 是 label 的兄弟节点，不是子元素，
+     那条选择器一直没生效，页面上一直多一个「选择文件」按钮和虚线框挤着。 */
+  #file-input { display: none; }
 
   .doc-item {
     padding: 8px 10px;
