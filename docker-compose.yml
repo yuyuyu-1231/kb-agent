@@ -61,6 +61,9 @@ services:
       AUTO_INGEST: "true"
     volumes:
       - ./data:/app/data
+      # 前端是单文件静态页，挂进去就不用每次改 HTML 都重建镜像。
+      # 只读：容器不需要写它。
+      - ./app/static:/app/app/static:ro
     depends_on:
       qdrant:
         condition: service_healthy

@@ -37,7 +37,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_loop, get_memory
-from app.models.schemas import AskRequest, AskResponse, CitationOut
+from app.models.schemas import (
+    AskRequest,
+    AskResponse,
+    CitationOut,
+    SessionHistoryResponse,
+    SessionMessage,
+)
 from harness.loop import AgentLoop
 from harness.memory import SessionMemory
 
@@ -138,6 +144,45 @@ async def ask_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get(
+    "/session/{session_id}",
+    response_model=SessionHistoryResponse,
+    summary="取回会话历史",
+    responses={404: {"description": "会话不存在"}},
+)
+async def session_history(
+    session_id: str,
+    memory: SessionMemory = Depends(get_memory),
+) -> SessionHistoryResponse:
+    """刷新页面后恢复对话用。
+
+    ## 为什么不把历史塞进 /ask 的 done 事件
+
+    `done` 只应该携带“这一轮”的结果。历史是另一个维度（可能几十条，
+    而且每轮都在变长），混进 SSE 会让每一帧都变大，前端还得去重。
+
+    ## 为什么不存在返回 404 而不是空列表
+
+    404 是给客户端的一个明确信号：“这个 id 已失效，清掉你本地存的”。
+    返回空列表的话，客户端会以为“会话存在但没消息”，于是一直复用这个死 id，
+    看上去就像“模型突然忘事了”。
+    """
+    exists = await asyncio.to_thread(memory.exists, session_id)
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+
+    rows = await asyncio.to_thread(memory.load, session_id)
+    messages = [
+        SessionMessage(
+            role=str(row.get("role") or ""),
+            content=str(row.get("content") or ""),
+        )
+        for row in rows
+        if isinstance(row, dict) and row.get("role")
+    ]
+    return SessionHistoryResponse(session_id=session_id, messages=messages)
 
 
 @router.post(

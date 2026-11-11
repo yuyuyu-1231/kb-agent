@@ -121,6 +121,17 @@
     border-radius: 4px;
     font-size: 11px;
   }
+  #new-session {
+    margin-top: 8px;
+    padding: 5px 10px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  #new-session:hover { border-color: var(--primary); color: var(--primary); }
 
   #chat-panel {
     flex: 1;
@@ -336,6 +347,7 @@
     <section>
       <h2>当前会话</h2>
       <div id="session-info">还没有会话。问第一句时会自动创建。</div>
+      <button id="new-session">新建会话</button>
     </section>
   </aside>
 
@@ -366,8 +378,12 @@
 // ---------------------------------------------------------------------------
 // 状态
 // ---------------------------------------------------------------------------
+// 会话 id 存 localStorage：刷新时 JS 内存清空，但服务端的历史还在。
+// 只存 id，不存消息 —— 消息以后端为准，避免两份数据对不上。
+const SESSION_KEY = "kb_session_id";
+
 const state = {
-  sessionId: null,
+  sessionId: localStorage.getItem(SESSION_KEY) || null,
   streaming: false,
   controller: null,     // AbortController，用于「停止」
   // 访问口令。存 localStorage 而不是写进这个文件——
@@ -391,6 +407,7 @@ const el = {
   token: $("token"),
   tokenSave: $("token-save"),
   tokenHint: $("token-hint"),
+  newSession: $("new-session"),
 };
 
 // ---------------------------------------------------------------------------
@@ -684,6 +701,83 @@ function renderSession() {
 }
 
 // ---------------------------------------------------------------------------
+// 会话恢复
+// ---------------------------------------------------------------------------
+function rememberSession(id) {
+  state.sessionId = id;
+  localStorage.setItem(SESSION_KEY, id);
+  renderSession();
+}
+
+function forgetSession() {
+  state.sessionId = null;
+  localStorage.removeItem(SESSION_KEY);
+  renderSession();
+}
+
+/** 把一条历史 assistant 消息渲染成气泡。
+ *  不带 steps/tokens/latency —— 那些属于当轮，存在消息里没意义。 */
+function appendHistoryMessage(text) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg agent";
+  wrap.innerHTML = `<div class="bubble"></div><div class="msg-meta">历史消息</div>`;
+  el.messages.appendChild(wrap);
+
+  const bubble = wrap.querySelector(".bubble");
+  bubble.innerHTML = miniMarkdown(text);
+  bubble.querySelectorAll(".cite-ref").forEach(node => {
+    node.addEventListener("click", () => jumpToCitation(node.dataset.cite));
+  });
+}
+
+/** 刷新后恢复上一轮对话。
+ *
+ *  后端是唯一真相：本地只存 session_id，消息按 id 去拉。
+ *  四种情况分开处理，别把“没口令”当成“会话失效”：
+ *    - 没 id         → 什么都不做
+ *    - 401           → 口令问题，不销毁会话
+ *    - 404           → 会话真没了（换机器/清了库），清掉本地 id 静默开新会话
+ *    - 200 但没消息  → 会话存在但还没问答过，保留占位
+ */
+async function restoreSession() {
+  renderSession();
+  if (!state.sessionId) return;
+
+  try {
+    const r = await fetch(`/qa/session/${encodeURIComponent(state.sessionId)}`, {
+      headers: authHeaders(),
+    });
+
+    if (r.status === 401) {
+      needToken(r.status);
+      return;
+    }
+    if (r.status === 404) {
+      forgetSession();
+      return;
+    }
+    if (!r.ok) return;
+
+    const d = await r.json();
+    const msgs = d.messages || [];
+    if (!msgs.length) return;
+
+    const empty = el.messages.querySelector(".empty");
+    if (empty) empty.remove();
+
+    for (const m of msgs) {
+      if (m.role === "user") appendUserMessage(m.content);
+      else appendHistoryMessage(m.content);
+    }
+    el.traceList.innerHTML =
+      '<div class="empty" style="padding:8px 0">历史不包含工具轨迹</div>';
+    scrollToBottom();
+  } catch (e) {
+    // 网络问题：安静失败，不影响接下来的提问
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SSE 解析（fetch + ReadableStream，不用 EventSource）
 // ---------------------------------------------------------------------------
 /**
@@ -788,11 +882,9 @@ function dispatch(rawEvent, agent) {
       agent.setCitations(payload.citations || []);
       break;
     case "done":
-      // 会话 ID 只在 done 里出现，第一轮拿到后存下来，后续请求带上
-      if (payload.session_id) {
-        state.sessionId = payload.session_id;
-        renderSession();
-      }
+      // 会话 ID 只在 done 里出现。第一轮拿到后写进 localStorage，
+      // 刷新页面还能接上同一段对话（历史从 GET /qa/session/{id} 拉）。
+      if (payload.session_id) rememberSession(payload.session_id);
       agent.finish(payload);
       return true;
     case "error":
@@ -820,6 +912,13 @@ function submit() {
 }
 
 el.send.addEventListener("click", submit);
+el.newSession.addEventListener("click", () => {
+  forgetSession();
+  el.messages.innerHTML =
+    '<div class="empty">新会话。问点什么试试：<br>「试用期员工能休年假吗？」</div>';
+  el.traceList.innerHTML =
+    '<div class="empty" style="padding:8px 0">还没有工具调用</div>';
+});
 el.stop.addEventListener("click", () => {
   state.controller?.abort();
 });
@@ -846,6 +945,7 @@ el.token.addEventListener("keydown", (e) => {
 
 refreshHealth();
 refreshDocs();
+restoreSession();   // 刷新后把上一轮对话拉回来
 renderSession();
 setInterval(refreshHealth, 15000);
 </script>

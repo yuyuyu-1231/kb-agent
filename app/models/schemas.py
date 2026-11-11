@@ -64,6 +64,22 @@ class AskResponse(BaseModel):
     tokens: int = 0
 
 
+class SessionMessage(BaseModel):
+    """一条历史消息。
+
+    只暴露 role / content。存储里的原始字典日后可能多出别的键，
+    这里显式裁剪 —— 和 CitationOut 一样，把内部结构挡在契约外面。
+    """
+    role: str
+    content: str
+
+
+class SessionHistoryResponse(BaseModel):
+    """会话历史。前端刷新后用它把对话渲染回来。"""
+    session_id: str
+    messages: list[SessionMessage] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # 文档上传
 # --------------------------------------------------------------------------- #

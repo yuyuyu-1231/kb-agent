@@ -173,3 +173,56 @@ def test_memory_ensure_then_append_keeps_single_row(tmp_path: Path) -> None:
 
     assert memory.stats()["sessions"] == 1
     assert memory.load("s1") == [{"role": "user", "content": "你好"}]
+
+
+# --------------------------------------------------------------------------- #
+# GET /qa/session/{id} —— 刷新页面后恢复对话
+# --------------------------------------------------------------------------- #
+
+def test_session_history_returns_messages(tmp_path: Path) -> None:
+    """真实 SessionMemory 注入进去，验序列化与顺序。"""
+    memory = SessionMemory(tmp_path / "s.db")
+    memory.append(
+        "s1",
+        {"role": "user", "content": "年假几天"},
+        {"role": "assistant", "content": "5 天"},
+    )
+    client = _client(memory=memory)
+
+    resp = client.get("/qa/session/s1")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session_id"] == "s1"
+    assert body["messages"] == [
+        {"role": "user", "content": "年假几天"},
+        {"role": "assistant", "content": "5 天"},
+    ]
+
+
+def test_session_history_404_when_missing(tmp_path: Path) -> None:
+    """会话不存在要返 404，而不是空列表。
+
+    这是个契约：前端靠 404 判断“本地存的 id 已经废了”，
+    返回空列表会让它一直用这个死 id。
+    """
+    client = _client(memory=SessionMemory(tmp_path / "s.db"))
+
+    resp = client.get("/qa/session/s-not-exist")
+
+    assert resp.status_code == 404
+    assert "不存在" in resp.json()["detail"]
+
+
+def test_session_history_strips_extra_fields(tmp_path: Path) -> None:
+    """存储里多出的键不能泄进响应（出参契约只允许 role/content）。"""
+    memory = SessionMemory(tmp_path / "s.db")
+    memory.append(
+        "s1",
+        {"role": "user", "content": "你好", "internal_trace": "secret"},
+    )
+    client = _client(memory=memory)
+
+    body = client.get("/qa/session/s1").json()
+
+    assert body["messages"] == [{"role": "user", "content": "你好"}]

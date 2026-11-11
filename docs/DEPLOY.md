@@ -175,7 +175,7 @@ echo "在线演示：http://<公网IP>:8000 （访问口令见简历/私信）" 
 
 ```bash
 docker compose logs -f app          # 看日志
-docker compose restart app          # 重启（改代码后要 --build）
+docker compose restart app          # 重启（改了 Python 代码要 --build；改前端 HTML 不用，static 是挂载的）
 docker compose down                 # 停（保留数据）
 docker compose down -v              # 停并删 Qdrant 数据（会触发重新入库）
 git pull && docker compose up -d --build   # 更新
