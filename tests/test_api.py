@@ -63,7 +63,8 @@ def _client(
     store_ready: bool = True,
     store_error: str = "",
 ) -> TestClient:
-    app = create_app()
+    # 显式关掉鉴权：这些测试和口令无关，也不该被 .env 里的 ACCESS_TOKEN 影响。
+    app = create_app(access_token="")
     # lifespan 不会跑（TestClient 没进 with），但要模拟它设置过的状态
     app.state.store_ready = store_ready
     app.state.store_error = store_error

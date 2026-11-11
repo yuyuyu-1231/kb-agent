@@ -267,6 +267,30 @@
   @keyframes blink { 50% { opacity: 0; } }
 
   .empty { color: var(--muted); text-align: center; padding: 40px 20px; font-size: 13px; line-height: 1.8; }
+  /* 访问口令：公网部署后才用得上，本地留空即可 */
+  #auth { display: flex; align-items: center; gap: 6px; }
+  #auth input {
+    width: 150px;
+    padding: 4px 8px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+  }
+  #auth button {
+    padding: 4px 10px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--text);
+    cursor: pointer;
+  }
+  #auth button:hover { border-color: var(--primary); color: var(--primary); }
+  #token-hint { font-size: 11px; color: var(--muted); }
+  #token-hint.bad { color: var(--danger); }
+  #token-hint.ok { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -275,6 +299,11 @@
   <h1>kb-agent</h1>
   <span class="sub">企业知识库 Agent · 检索 + 引用 + 转工单</span>
   <span class="spacer"></span>
+  <div id="auth">
+    <input id="token" type="password" placeholder="访问口令（本地留空）" autocomplete="off">
+    <button id="token-save" title="存到浏览器本地，只用于请求头">保存</button>
+    <span id="token-hint"></span>
+  </div>
   <div id="health">
     <span class="dot" id="health-dot"></span>
     <span id="health-text">连接中…</span>
@@ -334,6 +363,9 @@ const state = {
   sessionId: null,
   streaming: false,
   controller: null,     // AbortController，用于「停止」
+  // 访问口令。存 localStorage 而不是写进这个文件——
+  // 静态页是公开可下载的，写进去等于把口令发给所有人。
+  token: localStorage.getItem("kb_access_token") || "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -349,6 +381,9 @@ const el = {
   healthText: $("health-text"),
   dropzone: $("dropzone"),
   fileInput: $("file-input"),
+  token: $("token"),
+  tokenSave: $("token-save"),
+  tokenHint: $("token-hint"),
 };
 
 // ---------------------------------------------------------------------------
@@ -411,6 +446,36 @@ function setStreaming(on) {
 }
 
 // ---------------------------------------------------------------------------
+// 访问口令
+// ---------------------------------------------------------------------------
+/** 把口令拼进请求头。口令为空就不带 —— 本地开发时后端也不要求。 */
+function authHeaders(extra = {}) {
+  const h = { ...extra };
+  if (state.token) h["X-Access-Token"] = state.token;
+  return h;
+}
+
+function setTokenHint(text, kind = "") {
+  el.tokenHint.textContent = text;
+  el.tokenHint.className = kind;
+}
+
+function saveToken() {
+  state.token = el.token.value.trim();
+  localStorage.setItem("kb_access_token", state.token);
+  setTokenHint(state.token ? "已保存" : "已清空", "ok");
+  refreshDocs();
+}
+
+/** 401 统一收口：提示 + 聚焦输入框。返回 true 表示已处理。 */
+function needToken(status) {
+  if (status !== 401) return false;
+  setTokenHint("口令不正确", "bad");
+  el.token.focus();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // 健康检查 & 文档列表
 // ---------------------------------------------------------------------------
 async function refreshHealth() {
@@ -434,7 +499,11 @@ async function refreshHealth() {
 
 async function refreshDocs() {
   try {
-    const r = await fetch("/documents");
+    const r = await fetch("/documents", { headers: authHeaders() });
+    if (needToken(r.status)) {
+      el.docList.innerHTML = '<div class="empty" style="padding:12px">需要访问口令</div>';
+      return;
+    }
     const d = await r.json();
     if (!d.items.length) {
       el.docList.innerHTML = '<div class="empty" style="padding:12px">还没有文档</div>';
@@ -462,7 +531,15 @@ async function uploadFile(file) {
   form.append("file", file);
 
   try {
-    const r = await fetch("/documents/upload", { method: "POST", body: form });
+    const r = await fetch("/documents/upload", {
+      method: "POST",
+      body: form,
+      headers: authHeaders(),
+    });
+    if (needToken(r.status)) {
+      el.dropzone.textContent = "上传失败：需要访问口令";
+      return;
+    }
     const d = await r.json();
 
     if (!r.ok) {
@@ -620,7 +697,7 @@ async function askStream(question) {
   try {
     const resp = await fetch("/qa/ask/stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         question,
         session_id: state.sessionId,     // 第一轮是 null，服务端会生成
@@ -754,6 +831,12 @@ el.question.addEventListener("input", () => {
 // ---------------------------------------------------------------------------
 // 启动
 // ---------------------------------------------------------------------------
+el.token.value = state.token;
+el.tokenSave.addEventListener("click", saveToken);
+el.token.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") saveToken();
+});
+
 refreshHealth();
 refreshDocs();
 renderSession();

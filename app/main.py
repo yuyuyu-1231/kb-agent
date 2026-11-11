@@ -38,6 +38,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import documents, health, qa
+from app.api.auth import AccessControl
 from app.core.config import get_settings
 from app.infra.embedding import Embedder
 from app.infra.llm import OpenAILLMClient
@@ -173,12 +174,42 @@ async def lifespan(app: FastAPI):
     await vector_store.close()
 
 
-def create_app() -> FastAPI:
+def create_app(
+    *,
+    access_token: str | None = None,
+    rate_limit_per_minute: int | None = None,
+) -> FastAPI:
+    """建一个应用实例。
+
+    两个参数显式传入时覆盖 .env 同名配置：测试里
+    `create_app(access_token="secret")` 就能验鉴权，不用 monkeypatch 环境变量；
+    `create_app(access_token="")` 则把鉴权关掉，让与鉴权无关的测试不被干扰。
+    """
+    settings = get_settings()
+    token = settings.access_token if access_token is None else access_token
+    limit = (
+        settings.rate_limit_per_minute
+        if rate_limit_per_minute is None
+        else rate_limit_per_minute
+    )
+
     app = FastAPI(
         title="kb-agent",
         version="0.1.0",
         description="企业知识库 Agent：检索 + 引用 + 低置信度转工单",
         lifespan=lifespan,
+    )
+
+    # 顺序有讲究：Starlette 是「后添加的在外层」。
+    #
+    # 访问控制加在 CORS **之前** → 运行时 CORS 在外层包住它，
+    # 401/429 响应也会带上 CORS 头。反过来（鉴权在外层）的话，
+    # 浏览器只会报 “CORS error”，看不到真实的 401，排查会绕远路。
+    # 另外 CORS 的预检 OPTIONS 由外层直接应答，不会打到鉴权上。
+    app.add_middleware(
+        AccessControl,
+        token=token,
+        rate_limit_per_minute=limit,
     )
 
     # 开发期放宽：前端可能从 localhost 的任意端口访问（Live Server / file://）。

@@ -61,6 +61,16 @@ class Settings(BaseSettings):
     tool_timeout: float = 30.0
     tool_result_max_chars: int = 2000
 
+    # ---- 访问控制 ----
+    # 为空 = 不鉴权。本地开发/测试保持空，部署时在 .env 里设一个长口令。
+    #
+    # 为什么默认空而不是默认开：测试和本地开发不想背一个口令。
+    # 代价是“忘配 = 裸奔”，所以启动时如果为空会打一行 WARN（见 app/api/auth.py）。
+    access_token: str = ""
+    # 每 IP 每分钟请求上限。只在 access_token 非空时生效 ——
+    # 因为它是用来防“拿到口令之后滥用”和“暴力猜口令”的。
+    rate_limit_per_minute: int = 60
+
     # ---- 存储 ----
     @property
     def data_dir(self) -> Path:

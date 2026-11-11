@@ -687,6 +687,52 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 | apt 换阿里云源 | deb.debian.org 单请求 16.6s，Packages 超时，构建 exit 100 |
 | `HF_HUB_DISABLE_XET=1` | hf-mirror 不支持 Xet，进度条停在 3/5，不报错也不前进 |
 | `FASTEMBED_CACHE_PATH` + 缓存搬 `/models` | 每次启动重下 95MB，`/health` 卡启动期二十多分钟 |
+| `ACCESS_TOKEN` 部署前必须设 | 不设就是裸奔，`/qa/ask` 背后的 LLM key 会被扫描器刷 |
+
+---
+
+### 访问控制：口令 + 限流（已完成 11/11）
+
+公网暴露前必须先有这一层：`/qa/ask` 背后是 DeepSeek 的按量计费接口，
+没有口令等于把 key 交给扫描器。
+
+**实现**：`app/api/auth.py`，纯 ASGI 中间件。
+
+| 设计点 | 为什么 |
+|---|---|
+| **纯 ASGI，不用 `BaseHTTPMiddleware`** | 后者会包住 `send`，把响应体缓冲在自己的层里 —— SSE 会从“逐 token”退化成“攒完再发” |
+| **白名单 `/`、`/health`、`/static/*`** | 首页不放行就没地方输口令；`/health` 要给探活和状态灯用 |
+| **`/docs`、`/openapi.json` 不白名单** | 公网暴露接口清单等于给扫描器送地图 |
+| **先限流、后鉴权** | 反过来的话，猜口令不消耗配额，等于免费重试 |
+| **`hmac.compare_digest`** | `==` 在第一个不同字节就返回，能被时序攻击逐字节猜出口令 |
+| **滑动窗口（deque 存时间戳）** | 固定窗口有边界问题：第 59 秒打满、第 61 秒又能打满 |
+
+**配置**（`.env`，见 `.env.example`）：
+
+```bash
+ACCESS_TOKEN=              # 空 = 不鉴权（本地开发/测试）
+RATE_LIMIT_PER_MINUTE=60
+```
+
+**实测（11/11，`ACCESS_TOKEN=test-secret-123`）**：
+
+| 请求 | 结果 |
+|---|---|
+| `GET /health` 无 header | 200 ✓ 白名单 |
+| `GET /` 无 header | 200 ✓ 白名单 |
+| `GET /documents` 无 header | **401** ✓ |
+| `GET /documents` 错口令 | **401** ✓ |
+| `GET /documents` 对的口令 | 200 ✓ |
+| `GET /docs` 无 header | **401** ✓ |
+| `POST /qa/ask/stream` 无 header | **401** ✓ |
+| `POST /qa/ask/stream` 带 header | 200，**token × 176 / tool_call × 1 / citation × 1 / done × 1** ✓ 流式未被缓冲 |
+| 连打 `/health` | 第 **53** 次首次 429（此前已消耗 8 次，额度 60，完全吻合） ✓ |
+| 前端（Playwright） | 无 JS 报错；口令存 localStorage；文档列表加载出「员工手册.pdf · 6 页 · 14 chunks」 ✓ |
+
+**测试**：`tests/test_auth.py` 10 条，全量 **187 个通过**。
+
+**已知边界**：限流状态在进程内存，多 worker 时额度 = 配置 × worker 数，重启清零。
+要跨进程得放 Redis —— 对演示站是过度设计。
 
 ---
 
@@ -724,7 +770,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ### 开工顺序（明天从这里接）
 
-1. 写鉴权中间件 + 2 条测试（无口令 401 / 有口令 200）
+1. ~~写鉴权中间件 + 测试~~（已完成 11/11，见上节）
 2. 买服务器（2 核 4G），安全组放开 8000
 3. 服务器上 `git clone` → 传 `.env`（**不要提交**）→ `docker compose up -d --build`
 4. 验四件事：公网 `/health` 为 ok/14、首页能开、上传能跑、问答能逐字出
