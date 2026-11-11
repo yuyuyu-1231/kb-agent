@@ -93,6 +93,11 @@ ACCESS_TOKEN=<上一步生成的口令>            # 空着就是裸奔
 ## 4. 起服务
 
 ```bash
+# 先修 data 目录权限：容器里以 appuser（uid 10001）运行，
+# 而解压出来的 data/ 归 root —— 不改这两行，容器会建不了 kb.db 而反复重启。
+# （Windows 上 Docker Desktop 会把挂载权限放开，所以本机不会遇到这个坑。）
+chown -R 10001:10001 /root/kb-agent/data
+
 docker compose up -d --build
 ```
 
@@ -156,6 +161,7 @@ echo "在线演示：http://<公网IP>:8000 （访问口令见简历/私信）" 
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
+| 容器反复重启，日志 `sqlite3.OperationalError: unable to open database file` | **`data/` 目录归 root，容器里是 appuser（uid 10001），建不了 `kb.db`** | `chown -R 10001:10001 /root/kb-agent/data` 后 `docker compose up -d --force-recreate app` |
 | 构建卡在 `Fetching 5 files 3/5` 十分钟 | hf-mirror 的网络问题 | 已内置 `HF_HUB_DISABLE_XET=1`；仍卡就重跑一次（层缓存会续上） |
 | 构建卡在拉基础镜像 | Docker Hub 慢 | 检查第 1 步的 `registry-mirrors` 是否生效：`docker info \| grep -A2 Mirrors` |
 | 服务起来后 `/health` 一直 degraded | Qdrant 没起来 | `docker compose ps` 看 qdrant 是否 healthy；`docker compose logs qdrant` |

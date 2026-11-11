@@ -736,6 +736,59 @@ RATE_LIMIT_PER_MINUTE=60
 
 ---
 
+### 公网部署实录（11/11，阿里云轻量 2 核 2G）
+
+首次把服务真的跑到了一台公网服务器上。
+
+**实测环境**：Ubuntu 24.04.2 / 2 核 / 标称 2G（实际可用 **1613 MB**）/ 40G 盘。
+
+| 步骤 | 结果 |
+|---|---|
+| 加 2G swap | ✅（`free` 里 Swap 2047 MB） |
+| 装 Docker（Ubuntu 源 `docker.io`，非 `get.docker.com`） | ✅ 29.1.3 + compose 2.40.3 + buildx 0.30.1 |
+| 配 registry-mirrors | ✅ daocloud 生效 |
+| 代码上传（GitHub 不通，改走 tar + SFTP） | ✅ 780KB / 118 文件 |
+| **镜像构建** | ✅ **约 4 分钟**（服务器带宽比家里快很多） |
+| 容器启动 + 自动入库 | ✅ `[AUTO_INGEST] 员工手册.pdf: 14 chunks` |
+| `/health` | ✅ `{"status":"ok","chunks":14}` |
+| 鉴权 | ✅ 无 header 401 / 带 header 200 |
+| **流式** | ✅ **221 个 token 帧**，`stop_reason=answered`，3.37s |
+
+**内存实测（推翻了之前的保守估算）**：
+
+```
+kb-agent   254 MiB
+kb-qdrant  108 MiB
+可用      847 MB（swap 使用 0）
+```
+
+稳态只占 **约 360 MB**。2 核 2G 完全够用，swap 只在构建时被用上。
+
+#### 新踩的坑：Linux 上的 `data/` 目录权限
+
+容器里以 `appuser`（uid 10001）运行，而解压出来的 `data/` 归 root：
+
+```
+sqlite3.OperationalError: unable to open database file
+ERROR:    Application startup failed. Exiting.
+```
+
+表现是容器 **反复重启**（`restart: unless-stopped`），`docker ps` 显示 `Restarting`。
+
+**修法**：`chown -R 10001:10001 /root/kb-agent/data` 后重建容器。
+
+**为什么本机永远碰不到**：Docker Desktop 的 bind mount 会把权限放开，
+容器里怎么写都行；Linux 上 bind mount 保留宿主机的 uid/gid，权限是真生效的。
+**这类问题只有真机部署才会暴露。**
+
+#### 另一个只有真机才暴露的：GitHub 不通
+
+服务器 `curl https://github.com` 返回 `000`，`git clone` 直接不可行。
+改用本地 `git archive` 打包 + SFTP 上传（包内包含 `data/corpus/员工手册.pdf`，
+否则 `AUTO_INGEST` 找不到 PDF）。
+
+---
+
 ## 下一步
 
 **后端、前端、本机构建镜像全部完成（11/10）。**
