@@ -63,8 +63,11 @@ _REFUSAL_PATTERNS = tuple(
         r"未规定", r"没有规定", r"未提及", r"没有提及",
         r"无法回答", r"未说明", r"没有说明",
         # 知识库/手册/文档 + 否定 + （隔几个字）+ 内容名词
-        r"(?:知识库|手册|文档|制度|资料).{0,20}(?:没有|未|查不到|暂无|无法)"
-        r".{0,20}(?:规定|条款|信息|内容|条文|相关)",
+        # 窗口放到 30：实测“知识库中确实没有关于年终奖（或十三薪、奖金发放办法）的任何规定”
+        # 中间隔了 22 个字，{0,20} 会漏掉。
+        # 内容名词要包含“制度”：实测有答案写“没有关于落户/户口的任何制度”。
+        r"(?:知识库|手册|文档|制度|资料).{0,30}(?:没有|未|查不到|暂无|无法)"
+        r".{0,30}(?:规定|条款|信息|内容|条文|相关|制度|说明)",
     )
 )
 
@@ -87,6 +90,9 @@ class ItemResult:
     answerable: str
     expected_action: str
     question: str
+    # v1 = 最初的 50 条；v2 = 语料扩充后新增的 50 条。
+    # 两份难度不同，混在一起算平均值会把“新题更容易”读成“模型变强”。
+    batch: str = ""
 
     # L1
     retrieved_chunks: list[int] = field(default_factory=list)
@@ -131,6 +137,7 @@ class ItemResult:
         return {
             "id": self.item_id,
             "type": self.item_type,
+            "batch": self.batch,
             "answerable": self.answerable,
             "expected_action": self.expected_action,
             "question": self.question,
@@ -434,20 +441,12 @@ def aggregate(results: list[ItemResult]) -> dict[str, Any]:
     }
 
 
-def aggregate_by_type(results: list[ItemResult]) -> dict[str, dict[str, Any]]:
-    """按 direct / multi_hop / refusal 分组统计。
-
-    这是最能说明问题的一张表：
-    直接事实能答多少、多跳掉了多少、拒答准不准，三个数分开看。
-    """
-    by_type: dict[str, list[ItemResult]] = {}
-    for r in results:
-        by_type.setdefault(r.item_type, []).append(r)
-
+def _aggregate_groups(groups: dict[str, list[ItemResult]]) -> dict[str, dict[str, Any]]:
+    """给任意分组算同一套口径。by_type 和 by_batch 共用。"""
     out: dict[str, dict[str, Any]] = {}
-    for tkey, group in by_type.items():
+    for key, group in groups.items():
         answerable = [r for r in group if r.answerable != "none"]
-        out[tkey] = {
+        out[key] = {
             "count": len(group),
             "recall_at_5": round(
                 sum(1 for r in answerable if r.recall_hit) / len(answerable), 4
@@ -463,8 +462,49 @@ def aggregate_by_type(results: list[ItemResult]) -> dict[str, dict[str, Any]]:
             ),
             "avg_steps": round(sum(r.steps for r in group) / len(group), 2),
             "avg_latency_ms": round(sum(r.latency_ms for r in group) / len(group), 1),
+            "avg_tokens": round(sum(r.tokens for r in group) / len(group), 0),
+            "hallucination_count": sum(1 for r in group if r.hallucinated),
         }
     return out
+
+
+def aggregate_by_type(results: list[ItemResult]) -> dict[str, dict[str, Any]]:
+    """按 direct / multi_hop / conflict / refusal 分组统计。
+
+    这是最能说明问题的一张表：
+    直接事实能答多少、多跳掉了多少、冲突能不能发现、拒答准不准，分开看。
+    """
+    groups: dict[str, list[ItemResult]] = {}
+    for r in results:
+        groups.setdefault(r.item_type, []).append(r)
+    return _aggregate_groups(groups)
+
+
+def aggregate_by_batch(results: list[ItemResult]) -> dict[str, dict[str, Any]]:
+    """按 v1 / v2 分组统计。
+
+    **为什么需要这个**：样本从 50 扩到 100 后，新旧题的难度不是同一水平。
+    实测 2026-11-12：总体多跳关键点从 70.3% 升到 82.9%，看着像变好了，
+    实际是因为新题的 key_points 直接取自原文措辞——新题更容易命中。
+    只有拆开看，才能分辨“系统变强”和“题目变简”。
+    """
+    groups: dict[str, list[ItemResult]] = {}
+    for r in results:
+        groups.setdefault(r.batch or "unknown", []).append(r)
+    return _aggregate_groups(groups)
+
+
+def aggregate_by_batch_type(results: list[ItemResult]) -> dict[str, dict[str, Any]]:
+    """按 ``batch/type`` 交叉分组（如 ``v1/multi_hop``）。
+
+    这是回答“新题到底容易多少”的关键表：拿 v1 的 16 条多跳
+    和 v2 的 24 条多跳直接比，而不是拿总体平均比。
+    """
+    groups: dict[str, list[ItemResult]] = {}
+    for r in results:
+        key = f"{r.batch or 'unknown'}/{r.item_type}"
+        groups.setdefault(key, []).append(r)
+    return _aggregate_groups(groups)
 
 
 def median(values: list[float]) -> float:

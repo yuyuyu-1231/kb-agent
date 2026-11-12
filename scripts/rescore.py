@@ -30,6 +30,8 @@ from app.services.evaluation import (  # noqa: E402
     ItemResult,
     aggregate,
     aggregate_by_type,
+    aggregate_by_batch,
+    aggregate_by_batch_type,
     detect_refusal,
     find_must_not,
     match_key_point,
@@ -87,6 +89,8 @@ def rebuild(d: dict, item: dict) -> ItemResult:
         answerable=d["answerable"],
         expected_action=d["expected_action"],
         question=d["question"],
+        # 批次从评估集取：报告是旧版时记录里没有 batch，会回退到空串
+        batch=item.get("batch") or d.get("batch") or "",
         retrieved_chunks=d.get("retrieved_chunks") or [],
         recall_hit=bool(d.get("recall_hit")),
         reciprocal_rank=float(d.get("reciprocal_rank") or 0.0),
@@ -261,6 +265,8 @@ def main() -> None:
     results = [rebuild(d, eval_items.get(d["id"], {})) for d in report["items"]]
     new_summary = aggregate(results)
     new_by_type = aggregate_by_type(results)
+    new_by_batch = aggregate_by_batch(results)
+    new_by_batch_type = aggregate_by_batch_type(results)
 
     out = {
         "run_at": report["run_at"],
@@ -269,6 +275,8 @@ def main() -> None:
         "config": report["config"],
         "summary": new_summary,
         "by_type": new_by_type,
+        "by_batch": new_by_batch,
+        "by_batch_type": new_by_batch_type,
         "tickets_created": report.get("tickets_created", 0),
         "elapsed_seconds": report.get("elapsed_seconds", 0),
         "items": [r.to_dict() for r in results],
@@ -303,6 +311,28 @@ def main() -> None:
     print("")
     print(f"-> {dst}")
     print(f"-> {BASELINE_MD}")
+
+    # ----------------------------------------------------------------
+    # 批次 × 题型：回答“新题到底容易多少”
+    # ----------------------------------------------------------------
+    print("")
+    print("=" * 74)
+    print("按批次 × 题型（v1 = 旧 50 条，v2 = 语料扩充后新增的 50 条）")
+    print("=" * 74)
+    header = f"{'分组':<18}{'条数':>5}{'Recall':>8}{'关键点':>9}{'动作':>8}{'token':>8}"
+    print(header)
+    print("-" * 74)
+
+    def _pct(x) -> str:
+        return "—" if x is None else f"{x:.1%}"
+
+    for key in sorted(new_by_batch_type):
+        v = new_by_batch_type[key]
+        print(
+            f"{key:<18}{v['count']:>5}{_pct(v['recall_at_5']):>8}"
+            f"{_pct(v['keypoint_coverage']):>9}{_pct(v['action_accuracy']):>8}"
+            f"{v['avg_tokens']:>8.0f}"
+        )
 
     # 检查误拒：和 aggregate() 保持一致的口径
     # （表达了找不到 **且** 没引用到期望页码）
