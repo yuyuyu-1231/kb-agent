@@ -364,9 +364,17 @@ class _Tee:
                 pass
 
 
-async def main(limit: int | None, set_name: str) -> None:
+async def main(limit: int | None, set_name: str, batch: str | None, type_filter: str | None) -> None:
     settings = get_settings()
     items = load_eval_set(set_name, limit)
+
+    # 按批次 / 题型过滤：改了一部分题之后，只重跑那部分做前后对比。
+    # 不重新跑全部 100 条，省时间也避免把未改动的题重新引入方差。
+    if batch:
+        items = [it for it in items if it.get("batch") == batch]
+    if type_filter:
+        items = [it for it in items if it["type"] == type_filter]
+
     total = len(items)
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -492,5 +500,18 @@ if __name__ == "__main__":
         default="main",
         help="跑哪份评估集（默认 main）",
     )
+    parser.add_argument(
+        "--batch",
+        choices=["v1", "v2"],
+        default=None,
+        help="只跑某一批次（v1 = 旧 50 条，v2 = 语料扩充后新增的 50 条）",
+    )
+    parser.add_argument(
+        "--type",
+        dest="type_filter",
+        choices=["direct", "multi_hop", "conflict", "refusal"],
+        default=None,
+        help="只跑某一题型",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.limit, args.set_name))
+    asyncio.run(main(args.limit, args.set_name, args.batch, args.type_filter))

@@ -100,12 +100,11 @@ def main() -> int:
         for line in EVAL_SET.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    existing_ids = {it["id"] for it in existing}
-
-    dup = [it["id"] for it in ALL_NEW if it["id"] in existing_ids]
-    if dup:
-        print(f"[FAIL] id 与现有题目重复: {dup}")
-        return 1
+    # upsert：已存在的 id 用新版本覆盖（改题场景），新 id 追加。
+    # 早期是“遇到重复就报错”，但改题时那样就得手改 jsonl，容易出错。
+    by_id = {it["id"]: it for it in existing}
+    updated = [it["id"] for it in ALL_NEW if it["id"] in by_id]
+    added = [it["id"] for it in ALL_NEW if it["id"] not in by_id]
 
     corpus = load_corpus()
     print("语料规模：")
@@ -127,7 +126,10 @@ def main() -> int:
         print("（--dry-run，未写入）")
         return 0
 
-    merged = existing + ALL_NEW
+    merged_map = dict(by_id)
+    for it in ALL_NEW:
+        merged_map[it["id"]] = it
+    merged = list(merged_map.values())
     EVAL_SET.write_text(
         "\n".join(json.dumps(it, ensure_ascii=False) for it in merged) + "\n",
         encoding="utf-8",
@@ -137,6 +139,7 @@ def main() -> int:
 
     dist = Counter(it["type"] for it in merged)
     print(f"\n写入 {EVAL_SET.name}：{len(existing)} → {len(merged)} 条")
+    print(f"  更新 {len(updated)} 条，新增 {len(added)} 条")
     for t, n in sorted(dist.items()):
         print(f"  {t:<12} {n}")
     return 0
