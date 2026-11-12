@@ -293,9 +293,13 @@ def render_markdown(report: dict) -> str:
         if it["answerable"] != "none":
             if not it["recall_hit"]:
                 issues.append("检索未命中")
-            if not it["citation_ok"]:
+            if it["citation_ok"] is False:
                 issues.append("引用不准")
-            if it["refused"]:
+            # 和误拒率的口径保持一致：refused 只表示“语言上说了找不到”，
+            # 真正算误拒还要“没引用到期望页码”。
+            # 模型经常先给正确答案，再补一句“该条款未说明申请材料”——
+            # 那种不算误拒（否则报告里会冒出一堆假阳性）。
+            if it["refused"] and not it["citation_ok"]:
                 issues.append("误拒答")
         if not it["action_correct"]:
             issues.append(f"动作错（期望 {it['expected_action']}，实际 {it['stop_reason']}）")

@@ -39,12 +39,37 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any
 
-# 判断"是否明确拒答"的关键词。宁可宽一点：
-# 漏判会把"其实拒答了"算成"没拒答"，让应拒答率虚低，比虚高更保守。
-REFUSAL_MARKERS = (
-    "未找到", "未收录", "没有找到", "无相关", "未规定", "没有规定",
-    "未提及", "没有提及", "知识库中", "无法回答", "未说明", "没有说明",
+# 判断“是否明确拒答”。
+#
+# 两个设计点，都是被真实数据逼出来的：
+#
+# **只看答案开头**（`REFUSAL_HEAD_CHARS`）
+#     模型的答法是“先结论、后补充”。实测 2026-11-12（语料 1 份 → 4 份）：
+#     6 条被误判的题里，4 条的 marker 出现在第 280 字之后，内容是
+#     “该条款未规定申请材料”这种补充说明——那是**正确回答的一部分**。
+#     拒答的结论一定在开头。
+#
+# **用正则而不是纯词表**
+#     拒答措辞很活：知识库里没有…规定 / 知识库中暂无…信息 /
+#     知识库中查不到…条款。词表写不尽，用“知识库 + 否定词 + 内容名词”
+#     的结构匹配。但“根据知识库中的《员工手册》…”是正常引用，不能命中——
+#     所以否定词不能省。
+REFUSAL_HEAD_CHARS = 120
+
+_REFUSAL_PATTERNS = tuple(
+    re.compile(p)
+    for p in (
+        r"未找到", r"未收录", r"没有找到", r"无相关",
+        r"未规定", r"没有规定", r"未提及", r"没有提及",
+        r"无法回答", r"未说明", r"没有说明",
+        # 知识库/手册/文档 + 否定 + （隔几个字）+ 内容名词
+        r"(?:知识库|手册|文档|制度|资料).{0,20}(?:没有|未|查不到|暂无|无法)"
+        r".{0,20}(?:规定|条款|信息|内容|条文|相关)",
+    )
 )
+
+# 兼容旧引用：有地方按元组用
+REFUSAL_MARKERS = tuple(p.pattern for p in _REFUSAL_PATTERNS)
 
 # 无效成本的两个 stop_reason
 WASTED_STOP_REASONS = {"loop_detected", "max_steps"}
@@ -193,10 +218,15 @@ def match_key_point(answer: str, key_point: str) -> bool:
 
 
 def detect_refusal(answer: str) -> bool:
-    """答案是否明确表达了"找不到依据"。"""
+    """答案**开头**是否明确表达了“找不到依据”。
+
+    只扫前 `REFUSAL_HEAD_CHARS` 个字：拒答的结论一定在开头，
+    而“该条款未规定……”这种补充说明通常在后面。
+    """
     if not answer:
         return False
-    return any(marker in answer for marker in REFUSAL_MARKERS)
+    head = answer[:REFUSAL_HEAD_CHARS]
+    return any(p.search(head) for p in _REFUSAL_PATTERNS)
 
 
 # 安全题的拒答标记：和业务拒答的话术完全不同。
