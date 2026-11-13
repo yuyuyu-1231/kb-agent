@@ -932,6 +932,16 @@ function submit() {
 
 el.send.addEventListener("click", submit);
 el.newSession.addEventListener("click", () => {
+  // 有会话时先确认一次。
+  //
+  // 为什么加：之前点一下界面就空了，用户会以为对话丢了（实际还在服务端），
+  // 分不清“这个功能没做”和“这个功能坏了”——后者更伤。
+  // 这里只做“止损”：把行为说清楚，不补历史会话列表（那是产品功能）。
+  if (state.sessionId && !confirm(
+    "新建会话会清空当前对话。\n\n" +
+    "历史记录已保存在服务端（按 session_id 可恢复），不会丢失。\n\n继续？"
+  )) return;
+
   forgetSession();
   el.messages.innerHTML =
     '<div class="empty">新会话。问点什么试试：<br>「试用期员工能休年假吗？」</div>';
