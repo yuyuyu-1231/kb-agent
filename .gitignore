@@ -24,3 +24,5 @@ data/*.sqlite3
 
 # ---- 上传的原始文档（体积大，不入库；评估语料单独放 data/corpus 并显式 add）----
 data/uploads/
+
+data/mysql_verify_state.json
