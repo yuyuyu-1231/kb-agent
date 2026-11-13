@@ -1272,6 +1272,67 @@ FROM tickets WHERE id LIKE 'T-20261113-%';
 
 ---
 
+### 公网更新到 v2（11/13）
+
+**背景**：公网 `47.93.237.92:8000` 还是 11/11 的镜像（14 chunk），本地已经 54。
+用户看到“14 chunks · 0 工单”，以为是前端缓存，实际是**公网版本没同步**。
+
+| 地址 | 更新前 | 更新后 |
+|---|---|---|
+| 本机 | 54 chunks | 54 |
+| **公网** | **14 chunks / 0 工单** | **54 chunks / 0 工单** |
+
+#### 验收（六项全 PASS）
+
+| 项 | 结果 |
+|---|---|
+| 两容器 | ✅ kb-agent / kb-qdrant 均 healthy |
+| **`[AUTO_INGEST]`** | ✅ **四条**（清空 collection 后重启） |
+| `/health` | ✅ `{"status":"ok","chunks":54,"tickets":0,"sessions":4}` |
+| 无口令 `/documents` | ✅ HTTP 401 |
+| 带口令 `/documents` | ✅ total=4，合计 54 chunks |
+| 首页 / 浏览器渲染 | ✅ 200，31375 bytes；顶部与合计行均为 54 |
+
+`[AUTO_INGEST]` 四条（重启后 20 秒内完成）：
+
+```
+[AUTO_INGEST] IT设备与账号管理规范.pdf: 13 chunks
+[AUTO_INGEST] 员工手册.pdf: 14 chunks
+[AUTO_INGEST] 考勤与休假管理办法.pdf: 13 chunks
+[AUTO_INGEST] 费用报销管理办法.pdf: 14 chunks
+```
+
+#### 踩到的三个坑
+
+| # | 坑 | 现象 | 修法 |
+|---|---|---|---|
+| 1 | **`.gitignore` 没排除 `data/corpus`** | archive 带了 4 份 PDF（省了 SCP），但解压后 `data/` 属主变 root | `chown -R 10001:10001 data`（和 11/11 同一个坑） |
+| 2 | **`nohup ... &` 阻塞 paramiko** | `exec_command` 等 stdout 关闭，构建客户端读超时；服务端其实在跑 | `out.channel.close()`；并用 `--force-recreate` 补建容器 |
+| 3 | **新 compose 的 mysql 会吃垮 2G 服务器** | 直接 `up -d` 会把 mysql 拉起来（~400MB） | `profiles: ["mysql"]`，默认不启动 |
+
+#### 服务器内存（更新后）
+
+```
+kb-agent   238 MiB
+kb-qdrant   71 MiB
+合计       309 MiB / 1613 MiB
+```
+
+比 11/11 部署时更低（mysql 未启用）。
+
+#### 顺带澄清：限流要不要改分布式
+
+用户问“用了 MySQL 是不是就要做分布式限流”。**不需要，因果也不成立。**
+
+- 分布式限流的需求来自**多实例部署**，不是“用了什么数据库”
+- 本项目是**单容器单 worker**，进程内滑动窗口就是精确的
+- 要多实例的话应该用 **Redis**（`INCR` + `EXPIRE`），不是 MySQL——
+  限流是每请求路径，MySQL 会把只有 5 个连接的池打满
+
+何时必须改：`uvicorn --workers > 1`、多个 app 容器、需跨重启保留额度。
+
+---
+
 ### 本机部署复验（11/13）
 
 改了存储层（新增 pymysql 依赖）后需要重建镜像，顺带把部署四项重新验了一遍。
