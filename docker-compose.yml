@@ -51,6 +51,14 @@ services:
     image: mysql:8.4
     container_name: kb-mysql
     restart: unless-stopped
+    # profiles：默认**不启动**。
+    #
+    # 为什么不默认起：
+    # - 2 核 2G 的演示服务器上，MySQL 吃掉 ~400MB，和 app 抢内存会 OOM
+    # - DB_BACKEND 缺省是 sqlite，大部分时候根本用不到它
+    #
+    # 需要时：docker compose --profile mysql up -d mysql
+    profiles: ["mysql"]
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-kb_agent}
