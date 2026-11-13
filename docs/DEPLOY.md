@@ -114,9 +114,21 @@ docker compose logs -f app
 
 ```
 [AUTH] 已启用访问口令，限流 60 次/分钟/IP
+[AUTO_INGEST] IT设备与账号管理规范.pdf: 13 chunks
 [AUTO_INGEST] 员工手册.pdf: 14 chunks
+[AUTO_INGEST] 考勤与休假管理办法.pdf: 13 chunks
+[AUTO_INGEST] 费用报销管理办法.pdf: 14 chunks
 Application startup complete.
 Uvicorn running on http://0.0.0.0:8000
+```
+
+**注意**：`[AUTO_INGEST]` 只在 collection 为空时出现。已经有数据时会**幂等跳过**，日志里什么都没有——这是正常行为，不是故障。
+要单独验证入库逻辑，用临时 collection（不动现有数据）：
+
+```bash
+QDRANT_COLLECTION=kb_chunks_verify AUTO_INGEST=true \
+  uvicorn app.main:app --port 8001
+# 验证完：curl -X DELETE http://127.0.0.1:6333/collections/kb_chunks_verify
 ```
 
 ---
@@ -126,7 +138,10 @@ Uvicorn running on http://0.0.0.0:8000
 ```bash
 # ① 进程活着 + 知识库有数据
 curl -s http://127.0.0.1:8000/health
-# 期望 {"status":"ok","chunks":14,...}
+# 期望 {"status":"ok","chunks":54,...}
+#
+# 54 = 4 份文档合计（员工手册 14 + IT 13 + 考勤 13 + 报销 14）。
+# 旧文档写的 14 是 11/10 的单文档口径，已失效。
 
 # ② 容器都 healthy
 docker compose ps

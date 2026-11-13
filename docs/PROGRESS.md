@@ -1272,6 +1272,72 @@ FROM tickets WHERE id LIKE 'T-20261113-%';
 
 ---
 
+### 本机部署复验（11/13）
+
+改了存储层（新增 pymysql 依赖）后需要重建镜像，顺带把部署四项重新验了一遍。
+
+| 项 | 结果 |
+|---|---|
+| 镜像构建 | ✅ `kb-agent-app:latest` 1.6 GB，**90 秒**（层缓存命中） |
+| 容器 | ✅ `kb-agent` / `kb-qdrant` / `kb-mysql` 全 healthy |
+| `[AUTO_INGEST]` | ✅ 四条（用临时 collection 验证） |
+| `/health` | ✅ `{"status":"ok","chunks":54,"tickets":8,"sessions":17}` |
+| 首页 | ✅ HTTP 200，29.5 KB |
+
+#### 口径修正一：`chunks` 从 14 变 54
+
+`chunks=14` 是 **11/10 的口径**——那时语料只有《员工手册》一份。
+
+11/12 语料扩到 4 份后，正确值是 **54**：
+
+| 文档 | chunk |
+|---|---|
+| 员工手册 | 14 |
+| IT设备与账号管理规范 | 13 |
+| 考勤与休假管理办法 | 13 |
+| 费用报销管理办法 | 14 |
+| **合计** | **54** |
+
+**以后验收一律用 54。** 本文档其他地方的 14 是历史轮次的真实记录（当时确实只有 14），保留不改。
+
+#### 口径修正二：`com.docker.service` 与引擎无关
+
+之前的诊断是“Docker 引擎起不来是因为 `com.docker.service` 是 Stopped”。**本次实测证伪**：
+
+```
+com.docker.service   Stopped      ← 确实是停的
+docker info          OK 29.5.2    ← 引擎照样工作
+三容器              全 healthy
+```
+
+**为什么无关**：`com.docker.service` 是 Docker Desktop 的**提权辅助服务**（端口转发、文件共享），
+而引擎跑在 WSL 的 `docker-desktop` 发行版里，两者独立。
+
+11/10 那次引擎真的挂了，根因是 WSL 的 vhdx 挂载残留（`WSL_E_USER_VHD_ALREADY_ATTACHED`），
+`wsl --shutdown` 才是对症的。**把“相关”当成了“因果”。**
+
+#### 怎么验证 `[AUTO_INGEST]`（已有数据时）
+
+`_auto_ingest` 是幂等的（`count() > 0` 直接返回），所以已有 54 chunk 时**不会打日志**。
+三种办法：
+
+| 办法 | 代价 |
+|---|---|
+| **临时换 collection**（推荐） | 不动现有数据；验证完删临时 collection |
+| `docker compose down -v` | **会删数据**，要从头入库 |
+| 加一份新 PDF | 会增量入库，但污染语料 |
+
+推荐做法：
+
+```bash
+QDRANT_COLLECTION=kb_chunks_verify AUTO_INGEST=true \
+  uvicorn app.main:app --port 8001
+# 看到四条 [AUTO_INGEST] 后
+curl -X DELETE http://127.0.0.1:6333/collections/kb_chunks_verify
+```
+
+---
+
 ## 下一步：收尾阶段（下一个里程碑：简历定稿）
 
 **功能开发到此为止。** 剩余时间全部用于“把已有的东西讲透 + 写成简历”。
