@@ -99,6 +99,14 @@
      那条选择器一直没生效，页面上一直多一个「选择文件」按钮和虚线框挤着。 */
   #file-input { display: none; }
 
+  .doc-summary {
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 6px;
+  }
+  /* 没数据时不占位（加载中 / 出错 / 空库） */
+  .doc-summary:empty { display: none; }
+
   .doc-item {
     padding: 8px 10px;
     border: 1px solid var(--border);
@@ -341,6 +349,7 @@
 
     <section>
       <h2>知识库</h2>
+      <div id="doc-summary" class="doc-summary"></div>
       <div id="doc-list"><div class="empty" style="padding:12px">加载中…</div></div>
     </section>
 
@@ -399,6 +408,7 @@ const el = {
   stop: $("stop"),
   traceList: $("trace-list"),
   docList: $("doc-list"),
+  docSummary: $("doc-summary"),
   sessionInfo: $("session-info"),
   healthDot: $("health-dot"),
   healthText: $("health-text"),
@@ -526,13 +536,21 @@ async function refreshDocs() {
     const r = await fetch("/documents", { headers: authHeaders() });
     if (needToken(r.status)) {
       el.docList.innerHTML = '<div class="empty" style="padding:12px">需要访问口令</div>';
+      el.docSummary.textContent = "";
       return;
     }
     const d = await r.json();
     if (!d.items.length) {
       el.docList.innerHTML = '<div class="empty" style="padding:12px">还没有文档</div>';
+      el.docSummary.textContent = "";
       return;
     }
+    // 合计行：顶部状态栏只有一个总数，看不出“几份文档加起来”。
+    // 列表每行显示单份的 chunk 数，容易被误读成总数（真的发生过），
+    // 所以这里把两个数摆在一起，互相印证。
+    const totalChunks = d.items.reduce((s, it) => s + (it.chunk_count || 0), 0);
+    el.docSummary.textContent =
+      `共 ${d.total ?? d.items.length} 份文档 · ${totalChunks} chunks`;
     el.docList.innerHTML = d.items.map(doc => `
       <div class="doc-item">
         <div class="name">${escapeHtml(doc.doc_name || doc.doc_id)}</div>
@@ -541,6 +559,7 @@ async function refreshDocs() {
     `).join("");
   } catch (e) {
     el.docList.innerHTML = '<div class="empty" style="padding:12px">加载失败</div>';
+    el.docSummary.textContent = "";
   }
 }
 
