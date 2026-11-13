@@ -215,6 +215,7 @@ def create_app(
     # 401/429 响应也会带上 CORS 头。反过来（鉴权在外层）的话，
     # 浏览器只会报 “CORS error”，看不到真实的 401，排查会绕远路。
     # 另外 CORS 的预检 OPTIONS 由外层直接应答，不会打到鉴权上。
+    _warn_if_multi_worker(token)
     app.add_middleware(
         AccessControl,
         token=token,
@@ -245,6 +246,41 @@ def create_app(
             return FileResponse(STATIC_DIR / "index.html")
 
     return app
+
+
+def _warn_if_multi_worker(token: str) -> None:
+    """多 worker 时提醒：限流额度会变成 N 倍。
+
+    ## 为什么要这个
+
+    `RateLimiter` 的计数存在**进程内存**里。`uvicorn --workers 4` 就是 4 个
+    独立进程，各自算 20 次/分钟 —— 实际额度变成 80。
+
+    实测（2026-11-13，`scripts/verify_rate_limit.py`）：
+        1 worker  100 次请求 → 200 × 20，429 × 80
+        2 workers 100 次请求 → 200 × 40，429 × 60
+    精确 2 倍。
+
+    ## 为什么不直接改成 Redis
+
+    本项目部署是单容器单 worker，进程内计数就是**精确的**。
+    为一个不存在的场景引入 Redis（多一个容器 + 一个依赖）不划算。
+    但真有人改成多 worker 时，至少日志里会有一行提醒，不至于蒙在鼓里。
+
+    `WEB_CONCURRENCY` 是 uvicorn/gunicorn 在多 worker 时设置的环境变量。
+    """
+    if not token:
+        return
+    try:
+        workers = int(os.getenv("WEB_CONCURRENCY", "1") or 1)
+    except ValueError:
+        workers = 1
+    if workers > 1:
+        print(
+            f"[WARN] 检测到 {workers} 个 worker：限流状态在进程内，"
+            f"实际额度会变成配置值的 {workers} 倍。"
+            f"要精确控频需换成 Redis（INCR + EXPIRE）。"
+        )
 
 
 app = create_app()

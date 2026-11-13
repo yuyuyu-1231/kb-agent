@@ -158,3 +158,93 @@ def test_rate_limit_applies_before_auth() -> None:
     assert client.get("/openapi.json", headers={"X-Access-Token": "a"}).status_code == 401
     assert client.get("/openapi.json", headers={"X-Access-Token": "b"}).status_code == 401
     assert client.get("/openapi.json", headers={"X-Access-Token": "c"}).status_code == 429
+
+
+def test_rate_limit_429_body_and_headers() -> None:
+    """429 的响应体要说清楚“多久几次”，且目前**没有 Retry-After**。
+
+    锁住“没有 Retry-After”这条不是为了守住现状，是因为
+    `docs/KERNEL.md` 的面试话术里明写了这一点。
+    以后真加上了，这条测试会红，逼着同步改话术 —— 否则说的和做的不一致。
+    """
+    client = _client(TOKEN, limit=1)
+    headers = {"X-Access-Token": TOKEN}
+    client.get("/openapi.json", headers=headers)         # 用掉唯一的名额
+    resp = client.get("/openapi.json", headers=headers)
+
+    assert resp.status_code == 429
+    assert resp.json()["detail"] == "请求过于频繁：每 IP 每分钟最多 1 次"
+    assert "retry-after" not in {k.lower() for k in resp.headers}
+
+
+def test_rate_limit_per_ip_independent() -> None:
+    """不同 IP 各自计数。
+
+    为什么不用 TestClient：它的 `scope["client"]` 永远是 `testclient`，
+    伪造不出两个 IP。直接调 ASGI 中间件、自己构造 scope 才能验证这一点。
+
+    实测（2026-11-13）：A 的第 21 次 429，同时 B 的第 1 次 200。
+    """
+    import asyncio
+
+    from app.api.auth import AccessControl
+
+    async def ok_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    mw = AccessControl(ok_app, token="t", rate_limit_per_minute=2)
+
+    async def call(ip: str) -> int:
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/x",
+            "headers": [(b"x-access-token", b"t")],
+            "client": (ip, 1234),
+        }
+        out = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(msg):
+            out.append(msg)
+
+        await mw(scope, receive, send)
+        return next(m["status"] for m in out if m["type"] == "http.response.start")
+
+    async def run():
+        a = [await call("1.1.1.1") for _ in range(3)]
+        b_first = await call("2.2.2.2")
+        b_third = [await call("2.2.2.2") for _ in range(2)]
+        return a, b_first, b_third
+
+    a, b_first, b_rest = asyncio.run(run())
+
+    assert a == [200, 200, 429], f"A 应该是 200/200/429，实际 {a}"
+    assert b_first == 200, "A 打满不应该影响 B"
+    assert b_rest == [200, 429], f"B 应该独立计数到 429，实际 {b_rest}"
+
+
+def test_warns_when_multiple_workers(monkeypatch, capsys) -> None:
+    """多 worker 启动时必须打一行警告。
+
+    实测：2 workers 时额度从 20 变成 40（`scripts/verify_rate_limit.py`）。
+    这是个已知边界，不能靠人记 —— 所以启动时主动提醒。
+    """
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    create_app(access_token=TOKEN)
+
+    out = capsys.readouterr().out
+    assert "2 个 worker" in out
+    assert "2 倍" in out
+
+
+def test_no_warning_for_single_worker(monkeypatch, capsys) -> None:
+    """单 worker 不应该有这条警告（否则日志里噪音太多，真警告会被忽略）。"""
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    create_app(access_token=TOKEN)
+
+    out = capsys.readouterr().out
+    assert "个 worker" not in out
