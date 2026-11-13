@@ -62,6 +62,7 @@ class Dialect(Protocol):
 
     def ddl_sessions(self) -> list[str]: ...
     def ddl_tickets(self) -> list[str]: ...
+    def ddl_extra(self) -> list[str]: ...
     def upsert_session_sql(self) -> str: ...
 
 
@@ -100,6 +101,15 @@ class SQLiteDialect:
             "CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)",
             "CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(created_at)",
         ]
+
+    def ddl_extra(self) -> list[str]:
+        """SQLite 不需要序列表。
+
+        为什么：SQLite 的写是**串行**的（写事务持有库级写锁），
+        所以「查最大序号 + 插入」天然不会撞；MySQL 没这个保证，
+        见 MySQLTicketStore._next_id 的注释。
+        """
+        return []
 
     def upsert_session_sql(self) -> str:
         return """
@@ -153,6 +163,29 @@ class MySQLDialect:
                 PRIMARY KEY (id),
                 KEY idx_tickets_status  (status),
                 KEY idx_tickets_created (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        ]
+
+    def ddl_extra(self) -> list[str]:
+        """序列表：工单号的发号器。
+
+        为什么需要它：旧实现用「查 tickets 的最大 id + 1」，但 MySQL 的
+        普通 SELECT 是**快照读**（不加锁），多个事务会读到同一个最大序号，
+        然后都去插同一个主键。
+
+        实测（2026-11-13，20 线程并发）：**17/20 撞 IntegrityError**，
+        只有 3 个成功。
+
+        改成单独的计数行后，`UPDATE ... WHERE name = ?` 会对这一行加排他锁，
+        并发事务在这里排队，序号天然不重复。
+        """
+        return [
+            """
+            CREATE TABLE IF NOT EXISTS sequences (
+                name  VARCHAR(64) NOT NULL,
+                value BIGINT      NOT NULL DEFAULT 0,
+                PRIMARY KEY (name)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         ]
@@ -438,7 +471,11 @@ def init_schema(backend: SQLiteBackend | MySQLBackend) -> None:
     try:
         with backend.transaction(conn) as c:
             cur = c.cursor() if hasattr(c, "cursor") else c
-            for stmt in backend.dialect.ddl_sessions() + backend.dialect.ddl_tickets():
+            for stmt in (
+                backend.dialect.ddl_sessions()
+                + backend.dialect.ddl_tickets()
+                + backend.dialect.ddl_extra()
+            ):
                 cur.execute(stmt)
             if hasattr(cur, "close"):
                 cur.close()

@@ -53,6 +53,22 @@ def test_mysql_ddl_has_indexes() -> None:
     assert "idx_tickets_created" in ddl
 
 
+def test_mysql_ddl_has_sequences_table() -> None:
+    """MySQL 必须有发号器表。
+
+    这条守的是一个真实事故：旧实现用「查 tickets 最大 id + 1」，
+    20 线程并发时**17/20 撞主键**。改成序列表后 20/20 成功。
+    """
+    ddl = "\n".join(MySQLDialect().ddl_extra())
+    assert "sequences" in ddl
+    assert "PRIMARY KEY (name)" in ddl
+
+
+def test_sqlite_needs_no_sequence_table() -> None:
+    """SQLite 不需要发号器：它的写是串行的，天然不会撞号。"""
+    assert SQLiteDialect().ddl_extra() == []
+
+
 def test_upsert_syntax_differs_between_dialects() -> None:
     """upsert 是两种方言差异最大的地方，写错就是语法错误。"""
     assert "ON CONFLICT" in SQLiteDialect().upsert_session_sql()
@@ -225,6 +241,58 @@ pytestmark_mysql = pytest.mark.skipif(
     not __import__("os").environ.get("RUN_MYSQL_TESTS"),
     reason="需要真实 MySQL：先 docker compose up -d mysql，再设 RUN_MYSQL_TESTS=1",
 )
+
+
+@pytestmark_mysql
+def test_mysql_concurrent_ticket_ids_unique() -> None:
+    """10 线程并发建单，零冲突且单号唯一。
+
+    这是整个存储层里**唯一一个只有真并发才能覆盖**的测试：
+    串行跑 10 次 create 永远是依次递增，看不出竞态。
+
+    对应的事故：旧实现（查 max id + 1）在 20 线程下 17/20 撞主键。
+    """
+    import os
+    import threading
+
+    from app.infra.db_stores import build_ticket_store, init_backend
+
+    settings = _S(db_backend="mysql")
+    settings.mysql_password = os.getenv("MYSQL_PASSWORD", "kbpass")
+    settings.mysql_pool_size = 10          # 池必须 >= 线程数，否则测的是池排队
+    backend, ready = init_backend(settings)
+    assert ready, "MySQL 未就绪"
+
+    store = build_ticket_store(settings, backend)
+    ids: list[str] = []
+    errors: list[str] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(10)
+
+    def worker(i: int) -> None:
+        barrier.wait(timeout=10)
+        try:
+            t = store.create(
+                title=f"并发测试 {i}", category="其他", priority="P3",
+                summary="pytest-concurrency",
+            )
+            with lock:
+                ids.append(t["id"])
+        except Exception as exc:  # noqa: BLE001
+            with lock:
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"并发建单失败：{errors[:3]}"
+    assert len(ids) == 10
+    assert len(set(ids)) == 10, f"单号重复：{sorted(ids)}"
+
+    backend.close_all()
 
 
 @pytestmark_mysql

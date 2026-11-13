@@ -1182,7 +1182,93 @@ ERROR:    Application startup failed. Exiting.
 - **没做读写分离**：单实例没有从库。但要能讲清怎么做（见 `docs/KERNEL.md`）
 - **没做迁移脚本**：切后端不会搬数据，两边是独立数据集
 - **限流状态仍在进程内存**：换成 MySQL 并不解决这个问题（那是另一个坑）
-- **单实例 MySQL**：`_next_id` 的「查最大序号 + 插入」在并发下会撞主键，依靠事务 + 异常重试
+- **单实例 MySQL**：并发建单已用序列表解决（见下节）；但没有主从，单点故障仍在
+
+---
+
+### 并发建单：从 3/20 到 20/20（11/13 补验）
+
+上一版 `_next_id` 用的是「查 tickets 的最大 id + 1」。当时我在讲解里承认了
+“并发会撞主键”，但没实测。补验结果比预想的严重：
+
+| 版本 | 20 线程并发结果 |
+|---|---|
+| 旧（查 max id + 1） | **成功 3 / 20**，17 个 `IntegrityError` |
+| 新（序列表 + 行锁） | **20 / 20**，零冲突 |
+
+实际报错：
+
+```
+Duplicate entry 'T-20261113-0003' for key 'tickets.PRIMARY'
+```
+
+#### 为什么旧实现必撞
+
+**MySQL 的普通 `SELECT` 是快照读（consistent read），不加任何锁。**
+
+```
+时刻 T1   20 个事务同时读到最大序号 = 0003
+时刻 T2   20 个事务都算出 0004
+时刻 T3   第一个插 0004 成功，剩下 19 个全部主键冲突
+```
+
+事务在这里**保护不了**任何东西——事务隔离保证的是“看到一致的快照”，
+而两个事务看到同一个快照，结果就是算出同一个号。
+
+**SQLite 没这个问题**：它的写是串行的（写事务持库级写锁），
+所以 SQLite 版保持原实现，不需要序列表。这也是两个后端实现不完全对称的原因。
+
+#### 新实现：序列表 + 行锁
+
+```sql
+CREATE TABLE sequences (name VARCHAR(64) PRIMARY KEY, value BIGINT NOT NULL);
+
+INSERT INTO sequences (name, value) VALUES (%s, LAST_INSERT_ID(1))
+ON DUPLICATE KEY UPDATE value = LAST_INSERT_ID(value + 1);
+SELECT LAST_INSERT_ID();
+```
+
+三个关键点：
+
+| 点 | 作用 |
+|---|---|
+| **`ON DUPLICATE KEY UPDATE`** | 对该行加排他锁，20 个事务在这里**排队** |
+| **`LAST_INSERT_ID(expr)`** | MySQL 技巧：把 `expr` 写进连接级计数器并返回它，省一次 `SELECT value` |
+| **`LAST_INSERT_ID()` 是连接级** | 必须在同一连接读；事务内同一个 cursor 就是同一条连接 |
+
+#### 一个容易漏的坑：首次取号要和历史对齐
+
+计数器从 0 开始时，第一次取号拿到 `0001`——而库里已经有 `0001`-`0003`（旧版本建的），
+**直接撞历史单号**。
+
+所以首次取号前先对齐：
+
+```sql
+SELECT COALESCE(MAX(CAST(RIGHT(id, 4) AS UNSIGNED)), 0)
+FROM tickets WHERE id LIKE 'T-20261113-%';
+```
+
+只在序列表里**没有当天行**时做（一次查询），不是每次建单都扫表。
+
+#### 验证方法
+
+`scripts/verify_mysql_concurrency.py`：
+
+- 用 `threading.Barrier` 让 N 个线程**同时出发**，最大化竞态窗口
+- **连接池必须 >= 线程数**（`MYSQL_POOL_SIZE=20`），
+  否则请求在池里排队，测到的是“池的串行化”而不是“数据库的竞态”
+- 统计：成功数、异常分类、单号去重、库内新增条数
+
+#### 测试
+
+| 测试 | 默认 | `RUN_MYSQL_TESTS=1` |
+|---|---|---|
+| `test_mysql_ddl_has_sequences_table` | ✅ 跑 | ✅ 跑 |
+| `test_sqlite_needs_no_sequence_table` | ✅ 跑 | ✅ 跑 |
+| **`test_mysql_concurrent_ticket_ids_unique`**（10 线程） | ⏭ skip | ✅ 跑 |
+| `test_mysql_roundtrip` | ⏭ skip | ✅ 跑 |
+
+**默认：17 个测试，0 失败，2 skip；开 `RUN_MYSQL_TESTS=1` 后 17/17 全过。**
 
 ---
 

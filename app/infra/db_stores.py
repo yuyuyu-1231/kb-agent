@@ -296,25 +296,62 @@ class MySQLTicketStore:
     # ---------------------------------------------------------------- 内部
 
     def _next_id(self, cur) -> str:
-        """T-YYYYMMDD-NNNN，在事务内调用。
+        """T-YYYYMMDD-NNNN，从序列表取号。
 
-        并发下两个事务可能读到同一个最大序号，然后撞主键。
-        这是「用可读单号换一点并发风险」的取舍：本项目低频，
-        撞了会抛 IntegrityError，上层能重试；换来的是客服能念单号。
+        ## 为什么不用「查 tickets 最大 id + 1」
+
+        MySQL 的**普通 SELECT 是快照读**（consistent read），不加任何锁。
+        两个并发事务会读到同一个最大序号 `0003`，然后都去插 `0004`，
+        第二个撞主键。
+
+        实测（2026-11-13，`scripts/verify_mysql_concurrency.py`，20 线程）：
+            成功 3 / 20，**17 个 IntegrityError**
+            Duplicate entry 'T-20261113-0003' for key 'tickets.PRIMARY'
+
+        ## 现在怎么做
+
+        `sequences` 表里每天一行。`INSERT ... ON DUPLICATE KEY UPDATE`
+        会对这一行加排他锁，并发事务在这里**排队**，序号天然不重复。
+
+        `LAST_INSERT_ID(expr)` 是 MySQL 的技巧：把 `expr` 写进连接级的
+        last_insert_id，并把它当返回值。所以不用再 `SELECT value`，
+        省一次 round-trip，而且拿到的就是本事务写入的值（不会读到别人的）。
         """
-        prefix = f"T-{datetime.now().strftime('%Y%m%d')}-"
+        day = datetime.now().strftime("%Y%m%d")
+        seq_name = f"ticket_{day}"
+
+        # 首次取号时，先把计数器对齐到「当天已有的最大单号」。
+        #
+        # 不对齐会怎样：旧版本已经建了 0001-0003，而新计数器从 0 开始，
+        # 第一次取号拿到 0001 → 直接撞历史主键。
+        #
+        # 只在行不存在时做（一次查询），不是每次建单都扫表。
+        cur.execute("SELECT value FROM sequences WHERE name = %s", (seq_name,))
+        if cur.fetchone() is None:
+            cur.execute(
+                "SELECT COALESCE(MAX(CAST(RIGHT(id, 4) AS UNSIGNED)), 0) AS mx "
+                "FROM tickets WHERE id LIKE %s",
+                (f"T-{day}-%",),
+            )
+            row = cur.fetchone() or {}
+            base = int(row.get("mx") or 0)
+            # INSERT IGNORE：并发下两个事务可能同时走到这里，
+            # 一个插入成功、另一个被忽略，但不会报错也不会覆盖已推进的值。
+            cur.execute(
+                "INSERT IGNORE INTO sequences (name, value) VALUES (%s, %s)",
+                (seq_name, base),
+            )
+
         cur.execute(
-            "SELECT id FROM tickets WHERE id LIKE %s ORDER BY id DESC LIMIT 1",
-            (prefix + "%",),
+            "INSERT INTO sequences (name, value) VALUES (%s, LAST_INSERT_ID(1)) "
+            "ON DUPLICATE KEY UPDATE value = LAST_INSERT_ID(value + 1)",
+            (seq_name,),
         )
-        row = cur.fetchone()
-        seq = 1
-        if row and row.get("id"):
-            try:
-                seq = int(str(row["id"]).rsplit("-", 1)[-1]) + 1
-            except (ValueError, IndexError):
-                seq = 1
-        return f"{prefix}{seq:04d}"
+        # LAST_INSERT_ID() 是**连接级**的，必须在同一个连接上读；
+        # 事务内同一个 cursor 就是同一条连接，所以这里拿得到。
+        cur.execute("SELECT LAST_INSERT_ID() AS n")
+        seq = int(cur.fetchone()["n"])
+        return f"T-{day}-{seq:04d}"
 
     # ---------------------------------------------------------------- 写
 
