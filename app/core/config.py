@@ -71,6 +71,23 @@ class Settings(BaseSettings):
     # 因为它是用来防“拿到口令之后滥用”和“暴力猜口令”的。
     rate_limit_per_minute: int = 60
 
+    # ---- 数据库后端 ----
+    # sqlite（默认）| mysql
+    #
+    # 为什么默认必须是 sqlite：190 个测试和本地开发不能依赖一个必须起容器的服务。
+    # MySQL 只在部署时用，靠 .env 里一个变量切换。
+    db_backend: str = "sqlite"
+
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = "kb"
+    mysql_password: str = ""
+    mysql_database: str = "kb_agent"
+    # 连接池大小。固定 5：够用，而且不会把 MySQL 的 max_connections 吃满。
+    mysql_pool_size: int = 5
+    # 从池里拿连接的等待上限。没这个上限的话，数据库卡住会让请求永久阻塞。
+    mysql_acquire_timeout: float = 3.0
+
     # ---- 存储 ----
     @property
     def data_dir(self) -> Path:

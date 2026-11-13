@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.api.deps import get_memory, get_retriever, get_ticket_store
 from app.models.schemas import HealthResponse
@@ -32,6 +32,7 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health", response_model=HealthResponse, summary="健康检查")
 async def health(
+    request: Request,
     retriever: Retriever = Depends(get_retriever),
     tickets: TicketStore = Depends(get_ticket_store),
     memory: SessionMemory = Depends(get_memory),
@@ -41,6 +42,17 @@ async def health(
         asyncio.to_thread(tickets.stats),
         asyncio.to_thread(memory.stats),
     )
+
+    # 存储层状态：
+    # 1) 启动时建表成功与否（app.state.db_ready）
+    # 2) stats() 里探到的错误（MySQL 实现失败时不抛，返回 _error）
+    #
+    # 为什么不在这里真连一次库：stats() 已经代它探过了，
+    # 多探一次只会让 /health 变慢（前端每 15 秒轮询一次）。
+    db_ready = bool(getattr(request.app.state, "db_ready", True))
+    db_backend = getattr(request.app.state, "db_backend", "sqlite") or "sqlite"
+    if "_error" in ticket_stats or "_error" in session_stats:
+        db_ready = False
 
     # 每次健康检查都**真实探一次**，不缓存“启动时失败”这个结论。
     #
@@ -59,10 +71,19 @@ async def health(
         ready = False
         detail = f"向量库不可用：{type(exc).__name__}"
 
+    # 把两类问题拼进 detail：前端只展示这一行，得能看出是哪个依赖坏了。
+    # 不用新增字段，是因为 HealthResponse 的契约一旦改，
+    # 前端和监控侧都要跟着改。
+    problems: list[str] = []
+    if not ready and detail:
+        problems.append(detail)
+    if not db_ready:
+        problems.append(f"存储不可用（{db_backend}）")
+
     return HealthResponse(
-        status="ok" if ready else "degraded",
+        status="ok" if (ready and db_ready) else "degraded",
         chunks=chunks,
         tickets=int(ticket_stats.get("total", 0)),
         sessions=int(session_stats.get("sessions", 0)),
-        detail=detail,
+        detail="；".join(problems),
     )

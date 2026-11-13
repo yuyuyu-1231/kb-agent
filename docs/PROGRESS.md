@@ -1123,6 +1123,69 @@ ERROR:    Application startup failed. Exiting.
 
 ---
 
+## 第 7 轮：存储层可切换后端（11/13）
+
+把持久化从「写死 SQLite」改成「两套实现，一个配置切换」。
+
+### 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `app/infra/db.py` | Dialect（方言）+ 连接池 + 后端抽象 |
+| `app/infra/db_stores.py` | `MySQLSessionMemory` / `MySQLTicketStore` |
+| `scripts/verify_mysql.py` | 三阶段验证：write / read / degraded |
+| `tests/test_db_backend.py` | 14 条单测（13 跑 + 1 条真库默认 skip） |
+| `docker-compose.yml` | 新增 `mysql:8.4` 服务 + named volume |
+
+**SQLite 版一行未改**：`harness/memory.py` 和 `app/services/ticket.py` 保持原样，190 个测试的构造路径不变。
+
+### 为什么并存，不直接替换 SQLite
+
+| 方案 | 问题 |
+|---|---|
+| 直接换 | ①190 个测试全部要连 MySQL，CI 变慢且脆弱 ②本地开发要先起容器 ③**运维“为什么换”这个问题还是答不出来** |
+| 并存 + 可切换 | ①测试仍跑 SQLite，秒级 ②本地零依赖 ③**切换依据本身就是最好的面试答案** |
+
+**一句话**：直接换是把问题藏起来，并存是把判断讲出来。
+
+### 四类关键决定
+
+| 决定 | 理由 | 不这样做会怎样 |
+|---|---|---|
+| **不抽 Repository 接口，只两套类** | 方法签名一致就够；抽接口要两套实现各写一次空方法 | 多一层抽象但零收益 |
+| **MySQL 用同步驱动 pymysql** | 调用方已经在 `asyncio.to_thread` 里包了；改 async 要改 190 个测试 | 省微秒级调度，换来全面改造 |
+| **连接池自研（60 行）** | 要能讲清获取/归还/探活；用 DBUtils 就没东西可讲 | 无法回答“池怎么实现” |
+| **不用迁移工具** | 演示数据无保留价值，`CREATE TABLE IF NOT EXISTS` 足够 | 引入 Alembic 的复杂度，收益为零 |
+
+### 验证（四项，全部真跑）
+
+| 步骤 | 结果 |
+|---|---|
+| 建单 + 两轮会话写入 | ✅ `T-20261113-0001`；会话 4 条 |
+| `docker restart kb-mysql` → 读 | ✅ 工单与 4 条会话全部完好 |
+| `docker stop kb-mysql` → 读 | ✅ `stats()` 返回 `{'total': 0, '_error': 'OperationalError'}`，`list()` / `load()` 返回空，**无异常** |
+| `docker start` 恢复 | ✅ 数据仍在 |
+
+**全量测试：204 个（190 + 14），0 失败，1 skip**（真库那条需要 `RUN_MYSQL_TESTS=1`）。
+
+### 踩到的四个坑
+
+| # | 坑 | 现象 | 修法 |
+|---|---|---|---|
+| 1 | **`TEXT` 不能做主键** | 照搬 SQLite 的 `id TEXT PRIMARY KEY` 直接报错 | 全部字符串键改 `VARCHAR(n)` |
+| 2 | **`mysqladmin ping` 必须带密码** | MySQL 8 报 Access denied，健康检查永远不过 | `-uroot -p"$MYSQL_ROOT_PASSWORD"` |
+| 3 | **`depends_on: mysql` 会拖慢 SQLite 模式** | 启动从 10 秒变 40 秒 | 不写 depends_on，改应用层 `wait_for_db()` 重试 30s |
+| 4 | **`TEXT` 不能带 DEFAULT**（8.0.13 前） | `summary TEXT NOT NULL DEFAULT ''` 建表失败 | 去掉 DEFAULT，依赖插入时总有值 |
+
+### 局限（主动写清）
+
+- **没做读写分离**：单实例没有从库。但要能讲清怎么做（见 `docs/KERNEL.md`）
+- **没做迁移脚本**：切后端不会搬数据，两边是独立数据集
+- **限流状态仍在进程内存**：换成 MySQL 并不解决这个问题（那是另一个坑）
+- **单实例 MySQL**：`_next_id` 的「查最大序号 + 插入」在并发下会撞主键，依靠事务 + 异常重试
+
+---
+
 ## 下一步：收尾阶段（下一个里程碑：简历定稿）
 
 **功能开发到此为止。** 剩余时间全部用于“把已有的东西讲透 + 写成简历”。

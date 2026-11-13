@@ -41,6 +41,44 @@ services:
       retries: 10
       start_period: 20s
 
+  # MySQL：只有 DB_BACKEND=mysql 时才会被真正用到。
+  #
+  # 为什么不把它写进 app 的 depends_on：
+  # depends_on 是静态的，写进去之后 SQLite 模式也要等 MySQL 变 healthy，
+  # 启动从 10 秒变 40 秒。改成由应用层的 wait_for_db() 自己重试（30 秒）。
+  mysql:
+    # 固定大版本：latest 会导致“昨天能跑今天不能跑”；8.4 是 LTS
+    image: mysql:8.4
+    container_name: kb-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-kb_agent}
+      MYSQL_USER: ${MYSQL_USER:-kb}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-kbpass}
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      # named volume：容器重建不丢数据。
+      # 删数据用 `docker compose down -v`，那是不可逆操作。
+      - mysql_data:/var/lib/mysql
+    command:
+      # utf8mb4：默认的 utf8 是三字节，存 emoji / 部分生僻字会报错，
+      # 而且中文排序依赖 collation。
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      # mysqladmin ping 是最轻的探活；必须带密码，否则 MySQL 8 会报
+      # “Access denied”，健康检查永远不通过。
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$${MYSQL_ROOT_PASSWORD}" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   app:
     build:
       context: .
@@ -59,6 +97,14 @@ services:
       # 容器启动时如果 collection 是空的，自动把 data/corpus 下的 PDF 入库。
       # 幂等：已经有数据就跳过，不会重复入库。
       AUTO_INGEST: "true"
+      # 存储后端：缺省 sqlite。改成 mysql 时下面四项生效。
+      DB_BACKEND: ${DB_BACKEND:-sqlite}
+      # 服务名 mysql，不是 localhost（同 QDRANT_URL 的道理）
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER:-kb}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-kbpass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-kb_agent}
     volumes:
       - ./data:/app/data
       # 前端是单文件静态页，挂进去就不用每次改 HTML 都重建镜像。
@@ -71,3 +117,5 @@ services:
 volumes:
   qdrant_storage:
     name: kb-agent-qdrant-storage
+  mysql_data:
+    name: kb-agent-mysql-data

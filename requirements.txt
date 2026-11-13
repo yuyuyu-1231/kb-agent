@@ -22,6 +22,12 @@ qdrant-client
 fastembed
 pymupdf
 
+# MySQL 后端（DB_BACKEND=mysql 时才用到）。
+# 选 pymysql 而不是 mysqlclient：前者纯 Python，不需要编译器和 libmysqlclient，
+# 在 slim 镜像里能直接装。代价是比 C 扩展慢一些——对“单条 insert/select”
+# 这种量级完全可以忽略，而当 IO 成为瓶颈时应该先加索引、加缓存，而不是换驱动。
+pymysql
+
 # ---- test ----
 pytest
 pytest-asyncio

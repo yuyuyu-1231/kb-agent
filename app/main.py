@@ -40,16 +40,15 @@ from fastapi.staticfiles import StaticFiles
 from app.api import documents, health, qa
 from app.api.auth import AccessControl
 from app.core.config import get_settings
+from app.infra.db_stores import build_memory, build_ticket_store, init_backend
 from app.infra.embedding import Embedder
 from app.infra.llm import OpenAILLMClient
 from app.infra.qdrant import QdrantStore
 from app.services.retrieval import Retriever
-from app.services.ticket import TicketStore
 from app.tools.knowledge import register_knowledge_tools
 from app.tools.misc import register_misc_tools
 from app.tools.ticket import register_ticket_tools
 from harness.loop import AgentLoop
-from harness.memory import SessionMemory
 from harness.tools import ToolRegistry
 
 # app/main.py -> app -> static
@@ -139,8 +138,15 @@ async def lifespan(app: FastAPI):
         await _auto_ingest(settings, embedder, vector_store)
 
     retriever = Retriever.from_infra(embedder, vector_store)
-    tickets = TicketStore(settings.sqlite_path)
-    memory = SessionMemory(settings.sqlite_path)
+
+    # 存储后端：sqlite（默认）| mysql，靠 DB_BACKEND 切换。
+    #
+    # init_backend 会建表，并把 backend 返回来复用——不能在这里再调一次
+    # build_backend，否则 MySQL 会多出一个连接池。
+    # 第二个返回值是“就绪”：建表失败不阻止启动，只让 /health 报 degraded。
+    db_backend, db_ready = init_backend(settings)
+    tickets = build_ticket_store(settings, db_backend)
+    memory = build_memory(settings, db_backend)
 
     registry = ToolRegistry()
     register_knowledge_tools(registry, retriever)
@@ -161,6 +167,9 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.store_ready = store_ready
     app.state.store_error = store_error
+    # 存储层状态：db_ready=False 时 /health 报 degraded，但服务照常可用
+    app.state.db_ready = db_ready
+    app.state.db_backend = settings.db_backend
     app.state.embedder = embedder
     app.state.vector_store = vector_store
     app.state.retriever = retriever
